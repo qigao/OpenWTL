@@ -373,6 +373,138 @@ bool Aggregation() {
     return true;
 }
 
+inline constexpr CLSID polyClassId = {0xf9cb25e5, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+std::atomic<int> polyLive{0}, polyFinalized{0};
+int polyFailure = 0;
+bool polyPinned = true;
+OpenATL::COM::Module* polyModule = nullptr;
+class PolyValue : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                  public ATL::CComCoClass<PolyValue, &polyClassId>, public IPersist {
+public:
+    DECLARE_POLY_AGGREGATABLE(PolyValue)
+    DECLARE_GET_CONTROLLING_UNKNOWN()
+    BEGIN_COM_MAP(PolyValue)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+    PolyValue() {
+        if (polyFailure == 4) throw std::bad_alloc();
+        ++polyLive;
+    }
+    ~PolyValue() {
+        if (polyModule && polyModule->CanUnloadNow() != S_FALSE) polyPinned = false;
+        --polyLive;
+    }
+    HRESULT FinalConstruct() {
+        // The same temporary public interface must be safe in both modes.
+        ATL::CComPtr<IPersist> temporary;
+        HRESULT hr = _InternalQueryInterface(IID_IPersist, reinterpret_cast<void**>(&temporary.p));
+        if (FAILED(hr)) return hr;
+        if (polyFailure == 1) return E_ACCESSDENIED;
+        if (polyFailure == 2) throw ATL::CAtlException(E_ABORT);
+        if (polyFailure == 3) throw std::runtime_error("poly FinalConstruct");
+        return S_OK;
+    }
+    void FinalRelease() noexcept { ++polyFinalized; }
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = polyClassId;
+        return S_OK;
+    }
+};
+bool PolyObjects() {
+    using Raw = ATL::CComPolyObject<PolyValue>;
+    static_assert(std::is_same<PolyValue::_CreatorClass, ATL::CComCreator<Raw>>::value,
+        "Both modes must select the same wrapper creator");
+    static_assert(std::is_same<decltype(std::declval<Raw>().m_contained),
+        ATL::CComContainedObject<PolyValue>>::value, "Published contained member type");
+    AggregateOuter outer;
+    Raw* raw = nullptr;
+    CHECK(Raw::CreateInstance(nullptr, nullptr) == E_POINTER);
+    for (bool aggregated : {false, true}) {
+        CHECK(Raw::CreateInstance(aggregated ? &outer : nullptr, &raw) == S_OK && raw);
+        CHECK(raw->AddRef() == 1 && outer.refs == 1); // Raw private count was zero.
+        auto* control = aggregated ? static_cast<IUnknown*>(&outer) : static_cast<IUnknown*>(raw);
+        CHECK(raw->m_contained.GetControllingUnknown() == control);
+        ATL::CComPtr<IPersist> face;
+        CHECK(raw->QueryInterface(&face.p) == S_OK && face.p);
+        ATL::CComPtr<IUnknown> canonical, privateIdentity;
+        CHECK(face->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK && canonical.p == control);
+        CHECK(raw->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&privateIdentity.p)) == S_OK &&
+            privateIdentity.p == static_cast<IUnknown*>(raw));
+        CHECK(outer.refs == (aggregated ? 3u : 1u));
+        void* missing = reinterpret_cast<void*>(1);
+        CHECK(raw->QueryInterface(IID_IStream, &missing) == E_NOINTERFACE && !missing);
+        CHECK(raw->QueryInterface(IID_IPersist, nullptr) == E_POINTER);
+        privateIdentity.Release(); canonical.Release(); face.Release();
+        CHECK(outer.refs == 1 && raw->Release() == 0 && polyLive == 0);
+    }
+    ATL::CComPtr<IPersist> direct;
+    CHECK(PolyValue::CreateInstance(&direct.p) == S_OK);
+    CLSID returned{};
+    CHECK(direct->GetClassID(&returned) == S_OK && IsEqualCLSID(returned, polyClassId));
+    direct.Release();
+    CHECK(PolyValue::CreateInstance(&outer, &outer.inner.p) == S_OK && outer.refs == 1);
+    CHECK(outer.QueryInterface(IID_IPersist, reinterpret_cast<void**>(&direct.p)) == S_OK && outer.refs == 2);
+    direct.Release(); outer.inner.Release();
+    void* missing = reinterpret_cast<void*>(1);
+    CHECK(PolyValue::CreateInstance(&outer, IID_IPersist, &missing) == CLASS_E_NOAGGREGATION && !missing && !polyLive);
+
+    const OpenATL::COM::ClassEntry entry{polyClassId, nullptr,
+        &ATL::detail::AutoClassCreator<PolyValue>::CreateInstance};
+    OpenATL::COM::Module module(&entry, 1);
+    polyModule = &module;
+    for (bool aggregated : {false, true}) {
+        ATL::CComPtr<IClassFactory> factory;
+        CHECK(module.GetClassObject(polyClassId, IID_IClassFactory, reinterpret_cast<void**>(&factory.p)) == S_OK);
+        CHECK(factory->CreateInstance(aggregated ? &outer : nullptr, IID_IUnknown,
+            reinterpret_cast<void**>(&outer.inner.p)) == S_OK);
+        factory.Release();
+        CHECK(module.CanUnloadNow() == S_FALSE && polyLive == 1 && outer.refs == 1);
+        CHECK(outer.inner->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&direct.p)) == S_OK);
+        ATL::CComPtr<IUnknown> identity;
+        CHECK(direct->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK &&
+            identity.p == (aggregated ? static_cast<IUnknown*>(&outer) : outer.inner.p));
+        if (!aggregated) {
+            // Retired factory, concurrent public references, same private root.
+            std::atomic<bool> good{true};
+            std::vector<std::thread> callers;
+            for (int n = 0; n < 8; ++n) callers.emplace_back([&] {
+                for (int i = 0; i < 100; ++i) {
+                    direct->AddRef();
+                    CLSID id{};
+                    if (direct->GetClassID(&id) != S_OK || !IsEqualCLSID(id, polyClassId)) good = false;
+                    direct->Release();
+                }
+            });
+            for (auto& caller : callers) caller.join();
+            CHECK(good);
+        }
+        identity.Release(); direct.Release(); outer.inner.Release();
+        CHECK(polyLive == 0 && outer.refs == 1 && module.CanUnloadNow() == S_OK);
+    }
+    const HRESULT failures[] = {S_OK, E_ACCESSDENIED, E_ABORT, E_UNEXPECTED, E_OUTOFMEMORY};
+    for (bool aggregated : {false, true}) {
+        for (int mode = 0; mode <= 4; ++mode) {
+            polyFailure = mode;
+            const int finalized = polyFinalized;
+            missing = reinterpret_cast<void*>(1);
+            const IID& requested = mode == 0 ? IID_IStream : IID_IUnknown;
+            // Unsupported IID is a nonaggregated creation failure; aggregation
+            // rejects non-IUnknown requests before allocation.
+            const HRESULT expected = mode == 0 ? (aggregated ? CLASS_E_NOAGGREGATION : E_NOINTERFACE) : failures[mode];
+            CHECK(ATL::detail::AutoClassCreator<PolyValue>::CreateInstance(module,
+                aggregated ? &outer : nullptr, requested, &missing) == expected && !missing);
+            const int retired = mode == 4 || (mode == 0 && aggregated) ? 0 : 1;
+            CHECK(polyFinalized == finalized + retired && !polyLive && outer.refs == 1 && module.CanUnloadNow() == S_OK);
+        }
+    }
+    polyFailure = 0;
+    CHECK(polyPinned);
+    polyModule = nullptr;
+    return true;
+}
+
 inline constexpr CLSID autoAggregateClassId = {0xf9cb25e4, 0x2573, 0x4af4,
     {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
 std::atomic<int> autoAttempts{0}, autoLive{0}, autoFinalized{0}, autoFailure{0};
@@ -981,6 +1113,25 @@ bool TearOffFailuresAndThreads() {
     CHECK(outer.refs == 1);
     outer.inner.Release();
     CHECK(tearOwnerLive == 0 && tearLive[0] == 0 && tearLive[1] == 0 && tearOwnerValid);
+    // Poly owners also contain the real owner subobject in both modes.
+    for (bool aggregated : {false, true}) {
+        ATL::CComPolyObject<TearOwner>* poly = nullptr;
+        CHECK(ATL::CComPolyObject<TearOwner>::CreateInstance(aggregated ? &outer : nullptr, &poly) == S_OK);
+        CHECK(poly->AddRef() == 1);
+        outer.inner.Attach(poly);
+        IUnknown* control = aggregated ? static_cast<IUnknown*>(&outer) : static_cast<IUnknown*>(poly);
+        for (const IID* iid : {&iidOrdinaryTear, &iidCachedTear}) {
+            ATL::CComPtr<ITearProbe> face;
+            CHECK(control->QueryInterface(*iid, reinterpret_cast<void**>(&face.p)) == S_OK);
+            LONG value = 0;
+            CHECK(face->Read(&value) == S_OK && value == (iid == &iidOrdinaryTear ? 42 : 43));
+            ATL::CComPtr<IUnknown> identity;
+            CHECK(face->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == control);
+        }
+        CHECK(outer.refs == 1);
+        outer.inner.Release();
+        CHECK(tearOwnerLive == 0 && tearLive[0] == 0 && tearLive[1] == 0 && tearOwnerValid);
+    }
     return true;
 }
 
@@ -999,6 +1150,7 @@ public:
 bool RunAtlCompatibilityTests() {
     CHECK(ComMapChain());
     CHECK(Aggregation());
+    CHECK(PolyObjects());
     CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());
