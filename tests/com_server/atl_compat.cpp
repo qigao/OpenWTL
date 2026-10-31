@@ -468,13 +468,14 @@ bool PolyObjects() {
         if (!aggregated) {
             // Retired factory, concurrent public references, same private root.
             std::atomic<bool> good{true};
+            IPersist* shared = direct.p; // Owning pointer remains live until every caller joins.
             std::vector<std::thread> callers;
             for (int n = 0; n < 8; ++n) callers.emplace_back([&] {
                 for (int i = 0; i < 100; ++i) {
-                    direct->AddRef();
+                    shared->AddRef();
                     CLSID id{};
-                    if (direct->GetClassID(&id) != S_OK || !IsEqualCLSID(id, polyClassId)) good = false;
-                    direct->Release();
+                    if (shared->GetClassID(&id) != S_OK || !IsEqualCLSID(id, polyClassId)) good = false;
+                    shared->Release();
                 }
             });
             for (auto& caller : callers) caller.join();
