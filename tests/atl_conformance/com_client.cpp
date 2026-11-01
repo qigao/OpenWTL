@@ -124,6 +124,28 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
     if (negative.m_str != nullptr)
         return failure(61, "BSTR_negative_constructor", E_FAIL);
 
+    ATL::CComPtr<IStream> strings;
+    hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &strings);
+    if (FAILED(hr)) return failure(75, "BSTR_stream_create", hr);
+    if (a.WriteToStream(strings) != S_OK)
+        return failure(76, "BSTR_stream_write", E_FAIL);
+    LARGE_INTEGER start{};
+    ULONG stored = 0, read = 0;
+    OLECHAR raw[4]{};
+    if (strings->Seek(start, STREAM_SEEK_SET, nullptr) != S_OK ||
+        strings->Read(&stored, sizeof(stored), &read) != S_OK ||
+        read != sizeof(stored) || stored != sizeof(raw) ||
+        strings->Read(raw, sizeof(raw), &read) != S_OK || read != sizeof(raw) ||
+        std::memcmp(raw, embeddedA, sizeof(embeddedA)) || raw[3])
+        return failure(77, "BSTR_stream_independent_bytes", E_FAIL);
+    ATL::CComBSTR restored(L"previous");
+    if (strings->Seek(start, STREAM_SEEK_SET, nullptr) != S_OK ||
+        restored.ReadFromStream(strings) != S_OK || restored != a ||
+        restored.ReadFromStream(strings) != STG_E_READFAULT || restored != a ||
+        restored.ReadFromStream(nullptr) != E_POINTER ||
+        restored.WriteToStream(nullptr) != E_POINTER)
+        return failure(78, "BSTR_stream_read_and_truncation", E_FAIL);
+
     ATL::CComVariant va;
     va.vt = VT_BSTR;
     va.bstrVal = ::SysAllocStringLen(embeddedA,3);
