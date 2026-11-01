@@ -14,7 +14,9 @@
 
 namespace ATL { namespace detail {
 struct AxDialogInit {
+    enum class Kind { Stream, New };
     WORD id = 0;
+    Kind kind = Kind::Stream;
     std::wstring name, license;
     std::vector<BYTE> stream;
 };
@@ -73,15 +75,22 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                     break;
                 }
                 if (!init.Read(message) || !init.Read(length) || length > init.size - init.position) return ERROR_INVALID_DATA;
-                if (message != 0x0376) return ERROR_NOT_SUPPORTED; // Stream persistence; storage/binding is separate.
+                if (message != 0x0376 && message != 0x0378) return ERROR_NOT_SUPPORTED;
                 for (const auto& previous : initialization) if (previous.id == id) return ERROR_INVALID_DATA;
-                DialogTemplateReader payload(init.bytes + init.position, length);
-                if (!payload.Read(characters) || characters > (payload.size - payload.position) / sizeof(WCHAR)) return ERROR_INVALID_DATA;
                 AxDialogInit record; record.id = id;
-                record.license.resize(characters);
-                if (characters) std::memcpy(&record.license[0], payload.bytes + payload.position, characters * sizeof(WCHAR));
-                payload.position += characters * sizeof(WCHAR);
-                record.stream.assign(payload.bytes + payload.position, payload.bytes + payload.size);
+                if (message == 0x0378) {
+                    // Only the empty INITNEW record is admitted. Do not infer
+                    // license/persistence bytes from an unsupported payload.
+                    if (length) return ERROR_NOT_SUPPORTED;
+                    record.kind = AxDialogInit::Kind::New;
+                } else {
+                    DialogTemplateReader payload(init.bytes + init.position, length);
+                    if (!payload.Read(characters) || characters > (payload.size - payload.position) / sizeof(WCHAR)) return ERROR_INVALID_DATA;
+                    record.license.resize(characters);
+                    if (characters) std::memcpy(&record.license[0], payload.bytes + payload.position, characters * sizeof(WCHAR));
+                    payload.position += characters * sizeof(WCHAR);
+                    record.stream.assign(payload.bytes + payload.position, payload.bytes + payload.size);
+                }
                 initialization.push_back(std::move(record));
                 init.position += length;
             }

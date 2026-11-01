@@ -511,17 +511,20 @@ struct AxDialogCreation {
             const HWND child = ::GetDlgItem(dialog, record.id);
             if (!child) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
             CComPtr<IStream> stream;
-            HRESULT hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &stream);
-            if (FAILED(hr)) return hr;
-            ULONG written = 0;
-            if (!record.stream.empty()) {
-                hr = stream->Write(record.stream.data(), static_cast<ULONG>(record.stream.size()), &written);
+            HRESULT hr = S_OK;
+            if (record.kind == AxDialogInit::Kind::Stream) {
+                hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &stream);
                 if (FAILED(hr)) return hr;
-                if (written != record.stream.size()) return STG_E_WRITEFAULT;
+                ULONG written = 0;
+                if (!record.stream.empty()) {
+                    hr = stream->Write(record.stream.data(), static_cast<ULONG>(record.stream.size()), &written);
+                    if (FAILED(hr)) return hr;
+                    if (written != record.stream.size()) return STG_E_WRITEFAULT;
+                }
+                LARGE_INTEGER start{};
+                hr = stream->Seek(start, STREAM_SEEK_SET, nullptr);
+                if (FAILED(hr)) return hr;
             }
-            LARGE_INTEGER start{};
-            hr = stream->Seek(start, STREAM_SEEK_SET, nullptr);
-            if (FAILED(hr)) return hr;
             CComBSTR license;
             if (!record.license.empty()) {
                 license.Attach(::SysAllocStringLen(record.license.data(), static_cast<UINT>(record.license.size())));
