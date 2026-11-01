@@ -81,7 +81,7 @@ public:
 
     CComPtr<T>& operator=(CComPtr<T>&& lp) noexcept
     {
-        if (this != &lp) {
+        if (this != std::addressof(lp)) {
             if (p != NULL)
                 p->Release();
             p = lp.p;
