@@ -79,7 +79,8 @@ public:
             if (stream->Read(&tail, 1, &read) != S_OK || read != 1 || tail != 0xA5) return E_FAIL;
         }
         BYTE end = 0;
-        if (stream->Read(&end, 1, &read) != S_FALSE || read) return E_FAIL;
+        // Native HGLOBAL streams return S_OK with zero bytes at EOF.
+        if (FAILED(stream->Read(&end, 1, &read)) || read) return E_FAIL;
         ++state_.loaded; return Initialize();
     }
     HRESULT STDMETHODCALLTYPE Save(IStream*, BOOL) override { return E_NOTIMPL; }
@@ -196,6 +197,9 @@ public:
         ATL::CComPtr<IOleObject> control;
         good = parameter == 1773 && state.loaded == 1 && state.initialized == 0 && state.activated == 1 &&
             GetDlgControl(711, IID_IOleObject, reinterpret_cast<void**>(&control)) == S_OK && ::GetDlgItem(m_hWnd, 714);
+        WCHAR hostClass[32]{};
+        good = ::GetClassNameW(::GetDlgItem(m_hWnd, 711), hostClass, 32) &&
+            !::wcscmp(hostClass, resource == 611 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
         if (modal) good = EndDialog(93) && good;
         else if (closeInInit) good = DestroyWindow() && good;
         return TRUE;

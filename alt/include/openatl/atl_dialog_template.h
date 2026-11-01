@@ -146,7 +146,8 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
             static constexpr WCHAR host[] = L"AtlAxWin140";
             result.insert(result.end(), reader.bytes + start, reader.bytes + itemClass.begin);
             const auto hostBytes = reinterpret_cast<const BYTE*>(host);
-            result.insert(result.end(), hostBytes, hostBytes + sizeof(host));
+            if (clsidClass) result.insert(result.end(), hostBytes, hostBytes + sizeof(host));
+            else result.insert(result.end(), reader.bytes + itemClass.begin, reader.bytes + itemClass.end);
             if (record) {
                 const auto& name = clsidClass ? itemClass : itemTitle;
                 if (name.ordinal || name.end - name.begin <= sizeof(WORD)) return ERROR_INVALID_DATA;
