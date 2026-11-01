@@ -328,6 +328,7 @@ public:
     ~OwnerDrawDialog() { ++state_.deleted; }
     int GetIDD() const { return state_.resource; }
     LRESULT Measure(UINT, WPARAM w, LPARAM l, BOOL&) {
+        std::fprintf(stderr, "ACTIVEX_PHASE measure-enter id=%u\n", static_cast<unsigned>(w));
         auto item = reinterpret_cast<MEASUREITEMSTRUCT*>(l);
         state_.good = state_.good && item && item->CtlID == w && (item->CtlID == 711 || item->CtlID == 712);
         if (!item) return FALSE;
@@ -337,9 +338,11 @@ public:
         if (!count) ++state_.beforeItems;
         item->itemWidth = 80; item->itemHeight = 21;
         if (state_.nested && !nested_) {
+            std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-begin\n");
             nested_ = true;
             PlainDialog nested; nested.resource = 637; nested.modal = true;
             state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 && state_.good;
+            std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-end\n");
         }
         if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && count > 0 && !state_.initialized)
             ::SendMessageW(m_hWnd, WM_INITDIALOG, 0, 0);
@@ -347,6 +350,7 @@ public:
             cancelled_ = true;
             ::DestroyWindow(m_hWnd); // Exercise retirement before application initialization.
         }
+        std::fprintf(stderr, "ACTIVEX_PHASE measure-return\n");
         return TRUE;
     }
     LRESULT Draw(UINT, WPARAM, LPARAM l, BOOL&) {
@@ -377,6 +381,7 @@ public:
         return state_.drawn > 0;
     }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
+        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-init\n");
         ++state_.initialized;
         const HWND list = ::GetDlgItem(m_hWnd, 711), combo = ::GetDlgItem(m_hWnd, 712);
         WCHAR text[32]{};
@@ -386,6 +391,7 @@ public:
         state_.good = state_.good && ::SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, L"low");
         state_.good = state_.good && ::SendMessageW(list, LB_GETITEMHEIGHT, 0, 0) == 21 && ::SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0) == 21;
         state_.good = Paint() && state_.good;
+        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-painted good=%d\n", static_cast<int>(state_.good));
         if (state_.modal) EndDialog(93);
         return TRUE;
     }
