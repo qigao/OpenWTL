@@ -9,8 +9,8 @@ DLL module exports and `OBJECT_ENTRY_AUTO` class discovery exist. A class
 can now supply its own real `UpdateRegistry(BOOL)` callback to participate
 in deterministic automatic DLL registration; the callback is not inferred
 from the CLSID. Bounded RGS resources, per-user type-library registration,
-basic/automatic aggregation and tear-offs have implemented subsets. CComPolyObject,
-full RGS/registration semantics and the complete ATL COM Server API remain gaps.
+basic/automatic/poly aggregation and tear-offs have implemented subsets.
+Full RGS/registration semantics and the complete ATL COM Server API remain gaps.
 
 For conventional ATL object declarations, `atlcom.h` supplies the
 [object, aggregation, tear-off and COM-map compatibility subsets](ATL_COMPATIBILITY.md).
@@ -693,3 +693,22 @@ each module rejects the other module's classes. Both unregister while a cached
 interface retains the owner/inners. All owned interfaces and COM caches retire
 before both images are verified unmapped. Original project builds, binary
 filename/export layout, machine-wide deployment and exact ATL layout remain open.
+
+
+## Poly objects on the existing factory engine
+
+CComPolyObject<T> and DECLARE_POLY_AGGREGATABLE add the standard single-wrapper
+policy to the existing automatic class creator path. m_contained delegates to
+the wrapper's private IUnknown for nonaggregated creation, or to the borrowed
+outer when aggregated. Private references and outer references stay independent.
+Raw creation returns zero references; owned creators retain a construction
+reference through QI and destroy all failed objects. Application and explicit
+COM module pins outlive the contained object's destructor.
+
+Existing core tests cover both modes, construction/exception failures,
+unsupported interfaces, exact ownership, concurrent references, factory
+retirement and tear-offs on poly owners. The existing Value DLL selects the
+poly macro and retains its actual STA/MTA native activation/aggregation,
+registration, error and unload coverage. No new engine, target, mode, workflow
+or custom export is added. Earlier milestone gaps for CComPolyObject are
+superseded by this subset; custom factories and exact ATL layout stay open.

@@ -346,6 +346,75 @@ private:
     }
 };
 
+// One contained allocation handles both creation modes. In the ordinary
+// case its public interfaces delegate to this wrapper's own IUnknown; with
+// an outer they delegate to that borrowed controlling identity instead.
+template<class Base>
+class CComPolyObject : private detail::AtlObjectModulePin, public IUnknown,
+    public CComObjectRootEx<typename Base::_ThreadModel::ThreadModelNoCS> {
+public:
+    explicit CComPolyObject(void* outer)
+        : m_contained(outer ? outer : static_cast<IUnknown*>(this)) {}
+    ~CComPolyObject() { FinalRelease(); }
+    CComContainedObject<Base> m_contained;
+    HRESULT FinalConstruct() { return m_contained.FinalConstruct(); }
+    void FinalRelease() noexcept { m_contained.FinalRelease(); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown)) {
+            *output = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return m_contained._InternalQueryInterface(iid, output);
+    }
+    template<class Q> HRESULT QueryInterface(Q** output) noexcept {
+        return QueryInterface(__uuidof(Q), reinterpret_cast<void**>(output));
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return this->InternalAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override {
+        const ULONG count = this->InternalRelease();
+        if (!count) delete this;
+        return count;
+    }
+    static HRESULT WINAPI CreateInstance(IUnknown* outer, CComPolyObject** output) noexcept {
+        return CreateObject(nullptr, outer, output);
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (outer && !IsEqualIID(iid, IID_IUnknown)) return CLASS_E_NOAGGREGATION;
+        CComPolyObject* object = nullptr;
+        HRESULT hr = CreateObject(&module, outer, &object);
+        if (FAILED(hr)) return hr;
+        object->AddRef();
+        hr = object->QueryInterface(iid, output);
+        object->Release();
+        return hr;
+    }
+private:
+    static HRESULT CreateObject(OpenATL::COM::Module* module, IUnknown* outer,
+                                CComPolyObject** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComPolyObject* object = nullptr;
+        try { object = new CComPolyObject(outer); }
+        catch (...) { return detail::AtlObjectException(); }
+        HRESULT hr = module ? object->BindModule(*module) : S_OK;
+        if (SUCCEEDED(hr)) {
+            object->InternalFinalConstructAddRef();
+            try { hr = object->FinalConstruct(); }
+            catch (...) { hr = detail::AtlObjectException(); }
+            object->InternalFinalConstructRelease();
+        }
+        if (FAILED(hr)) { delete object; return hr; }
+        *output = object; // Both raw modes start with zero private references.
+        return S_OK;
+    }
+};
+
 template<class Owner, class ThreadModel = CComObjectThreadModel>
 class CComTearOffObjectBase : public CComObjectRootEx<ThreadModel> {
 public:
@@ -579,6 +648,27 @@ public:
 };
 
 template<class Base>
+class CComCreator<CComPolyObject<Base>> {
+public:
+    static HRESULT WINAPI CreateInstance(void* outer, REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (outer && !IsEqualIID(iid, IID_IUnknown)) return CLASS_E_NOAGGREGATION;
+        CComPolyObject<Base>* object = nullptr;
+        HRESULT hr = CComPolyObject<Base>::CreateInstance(static_cast<IUnknown*>(outer), &object);
+        if (FAILED(hr)) return hr;
+        object->AddRef();
+        hr = object->QueryInterface(iid, output);
+        object->Release();
+        return hr;
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        return CComPolyObject<Base>::CreateInstance(module, outer, iid, output);
+    }
+};
+
+template<class Base>
 class CComCreator<CComTearOffObject<Base>> {
 public:
     static HRESULT WINAPI CreateInstance(void* owner, REFIID iid, void** output) noexcept {
@@ -676,6 +766,10 @@ public:
     template<class Q>
     static HRESULT WINAPI CreateInstance(Q** output) noexcept {
         return CreateInstance(nullptr, __uuidof(Q), reinterpret_cast<void**>(output));
+    }
+    template<class Q>
+    static HRESULT WINAPI CreateInstance(IUnknown* outer, Q** output) noexcept {
+        return CreateInstance(outer, __uuidof(Q), reinterpret_cast<void**>(output));
     }
 };
 namespace detail {
@@ -890,6 +984,8 @@ public: \
 #define DECLARE_ONLY_AGGREGATABLE(x) \
     using _CreatorClass = ATL::CComCreator2<ATL::CComFailCreator<E_FAIL>, \
                                           ATL::CComCreator<ATL::CComAggObject<x>>>;
+#define DECLARE_POLY_AGGREGATABLE(x) \
+    using _CreatorClass = ATL::CComCreator<ATL::CComPolyObject<x>>;
 #define DECLARE_GET_CONTROLLING_UNKNOWN() \
     IUnknown* GetControllingUnknown() noexcept override = 0;
 #define DECLARE_NOT_AGGREGATABLE(x) \

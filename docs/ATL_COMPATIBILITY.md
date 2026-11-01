@@ -35,9 +35,10 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `CComObject<T>` | Concrete IUnknown, raw creation with initial reference count **zero**, typed QI, last-release destruction |
 | `CComCoClass::Error`, `AtlReportError` | Six text/ANSI/resource overloads each; native ICreateErrorInfo/IErrorInfo publication, IID/description/help/source metadata and standard default/explicit HRESULT mapping. Resource text uses the selected image without fixed-buffer truncation. See error reporting below. |
 | `ISupportErrorInfoImpl<&IID>` | Native ISupportErrorInfo declaration with S_OK for the declared IID and S_FALSE otherwise; ordinary and cached tear-off error views share the owner identity. |
-| `CComCoClass<T, &CLSID>`, `CComCreator<Object>`, `CComCreator2` | Default aggregatable creator selection, CLSID accessor, owned local creation and class-declared nonaggregated/aggregate-only policies. Explicit CComCreator<CComObject<T>> remains nonaggregated. |
+| `CComCoClass<T, &CLSID>`, `CComCreator<Object>`, `CComCreator2` | Default aggregatable creator selection, CLSID accessor, owned local creation and class-declared nonaggregated/aggregate-only/poly policies, including the typed outer overload. Explicit CComCreator<CComObject<T>> remains nonaggregated. |
 | `CComContainedObject<T>`, `CComAggObject<T>` | Delegating contained interfaces and separate nondelegating inner IUnknown, zero-ref raw creation, construction failure cleanup and module pins through contained destruction. The outer identity is borrowed, not retained cyclically. |
-| `DECLARE_AGGREGATABLE`, `DECLARE_NOT_AGGREGATABLE`, `DECLARE_ONLY_AGGREGATABLE` | Built-in creator policies honored by direct CComCoClass creation and OBJECT_ENTRY_AUTO factories; aggregate factory creation requires IID_IUnknown. Custom factory policies and CComPolyObject remain unqualified. |
+| `DECLARE_AGGREGATABLE`, `DECLARE_NOT_AGGREGATABLE`, `DECLARE_ONLY_AGGREGATABLE`, `DECLARE_POLY_AGGREGATABLE` | Built-in creator policies honored by direct CComCoClass creation and OBJECT_ENTRY_AUTO factories; aggregate factory creation requires IID_IUnknown. Poly uses one CComPolyObject wrapper in both modes. Custom factory policies remain unqualified. |
+| `CComPolyObject<T>` | One wrapper and public CComContainedObject<T> member for both modes. Nonaggregated public interfaces delegate to the wrapper IUnknown; aggregated public interfaces delegate to the borrowed outer, while private IUnknown owns the allocation. Zero-ref raw creation, protected construction, failure cleanup and existing module pins are retained. |
 | `COM_INTERFACE_ENTRY_AGGREGATE`, `COM_INTERFACE_ENTRY_AGGREGATE_BLIND` | Delegate to an explicitly owned inner IUnknown, preserve the outer canonical identity and one owning QI reference, including through chained maps. |
 | `COM_INTERFACE_ENTRY_AUTOAGGREGATE`, `COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND` | Lazy native in-process CoCreateInstance with the controlling outer and IID_IUnknown. Serialized slot creation, activation failure/retry, retained inner after an unsupported IID, same-slot reentrancy rejection and blind fallback through the map. Caller initializes COM and releases the private slot in FinalRelease. |
 | `CComTearOffObjectBase`, `CComTearOffObject`, `CComCachedTearOffObject` | Ordinary tear-offs retain the owner until their own last release; cached private IUnknown is owner-held and public interfaces retain the controlling owner. Supports ordinary and aggregated owner subobjects without layout casts. See the typed-owner limitation below. |
@@ -118,7 +119,7 @@ IChain implementation uses standard 0xffff/0xffff dispatch for real property
 Invoke in STA/MTA. This is original-IDL and embedded-dispatch admission, not
 the whole original COMMap DLL build/link or any of the 37 pure-ATL projects passing.
 
-**Tracked compatibility gaps:** CComPolyObject, exact Microsoft tear-off member/layout contracts and custom factory policies,
+**Tracked compatibility gaps:** exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
 connection-point server templates, SAFEARRAY wrappers, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
@@ -244,3 +245,29 @@ registration exports, per-user paths, native activation/registered dispatch,
 interface image ownership, cached-owner retirement and actual DLL unmapping.
 This uses the existing production module/RGS/TypeLib engines unchanged.
 Untouched original project builds and exact binary/type layouts remain open.
+
+
+## Poly aggregation creator policy
+
+CComPolyObject<T> and DECLARE_POLY_AGGREGATABLE select the same wrapper for both
+aggregated and nonaggregated creation. The wrapper owns its private IUnknown
+and counter; m_contained is the public CComContainedObject<T> member in both
+cases. With no outer, contained interfaces delegate to the wrapper. With an
+outer, they delegate to that borrowed identity while private IUnknown remains
+independent. Aggregate factory creation accepts only IID_IUnknown. Raw creation
+starts with zero references. The typed CComCoClass outer overload uses the
+same class creator policy as the explicit-IID overload.
+
+The existing core case covers exact member/creator types, both identity/refcount
+modes, temporary public references during FinalConstruct, failure HRESULTs,
+exceptions/allocation failure, unsupported interfaces, concurrent references,
+factory retirement and ordinary/cached tear-offs on real contained owners.
+The existing registered Value DLL uses the poly macro, so its native STA/MTA
+activation, aggregation, methods, error metadata and unload cases use this
+policy. Targets, modes, workflows and stdout markers remain unchanged.
+Exact ATL binary layout and the documented tear-off m_pOwner type difference
+remain separate; no CComObject pointer is fabricated for a contained owner.
+
+Public contracts: [CComPolyObject](https://learn.microsoft.com/en-us/cpp/atl/reference/ccompolyobject-class),
+[aggregation macros](https://learn.microsoft.com/en-us/cpp/atl/reference/aggregation-and-class-factory-macros),
+and [CComCoClass](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomcoclass-class).

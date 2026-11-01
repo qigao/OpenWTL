@@ -534,3 +534,11 @@ retains a cached owner across unregister, and verifies actual DLL unmapping
 once objects and COM caches retire. No target, test mode or workflow is added.
 This qualifies the original module path in existing images; untouched VCXPROJ
 builds, original output/export layouts and machine-wide policies remain open.
+
+
+Automatic OBJECT_ENTRY_AUTO creation also honors DECLARE_POLY_AGGREGATABLE.
+Both aggregated and nonaggregated requests select CComPolyObject on the same
+factory engine. Its private IUnknown and contained public interfaces share the
+existing application/COM module pin contract. The registered Value DLL now
+uses this policy in the existing native STA/MTA activation and unload cases.
+Custom factory policies and exact ATL binary layouts remain unqualified.

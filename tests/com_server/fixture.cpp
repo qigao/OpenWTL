@@ -18,6 +18,7 @@ class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public IOpenATLDerived, public IOpenATLSecond,
               public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue> {
 public:
+    DECLARE_POLY_AGGREGATABLE(Value)
     BEGIN_COM_MAP(Value)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLDerived, IOpenATLDerived)
         COM_INTERFACE_ENTRY2_IID(IID_OpenATLValue, IOpenATLValue, IOpenATLDerived)
