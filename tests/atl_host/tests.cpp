@@ -315,7 +315,7 @@ public:
     END_MSG_MAP()
 };
 struct OwnerDrawState {
-    int initialized = 0, measured = 0, beforeItems = 0, drawn = 0, finalized = 0, deleted = 0;
+    int initialized = 0, measured = 0, listMeasured = 0, beforeInit = 0, drawn = 0, finalized = 0, deleted = 0;
     bool good = true, modal = false, nested = false, cancel = false, deleteOnFinal = false, recursiveInit = false;
     int resource = 649;
 };
@@ -333,9 +333,10 @@ public:
         state_.good = state_.good && item && item->CtlID == w && (item->CtlID == 711 || item->CtlID == 712);
         if (!item) return FALSE;
         ++state_.measured;
-        const HWND child = ::GetDlgItem(m_hWnd, static_cast<int>(item->CtlID));
-        const LRESULT count = child ? ::SendMessageW(child, item->CtlID == 711 ? LB_GETCOUNT : CB_GETCOUNT, 0, 0) : 0;
-        if (!count) ++state_.beforeItems;
+        if (item->CtlID == 711) ++state_.listMeasured;
+        // Fixed-height measurement can run while the child is still being
+        // created. Query its contents only after dialog initialization.
+        if (!state_.initialized) ++state_.beforeInit;
         item->itemWidth = 80; item->itemHeight = 21;
         if (state_.nested && !nested_) {
             std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-begin\n");
@@ -344,7 +345,7 @@ public:
             state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 && state_.good;
             std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-end\n");
         }
-        if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && count > 0 && !state_.initialized)
+        if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && state_.listMeasured == 2 && !state_.initialized)
             ::SendMessageW(m_hWnd, WM_INITDIALOG, 0, 0);
         if (state_.cancel && !cancelled_) {
             cancelled_ = true;
@@ -418,7 +419,7 @@ bool ownerDrawDialogs() {
             CHECK(dialog.DestroyWindow());
         }
         CHECK(state.good && state.initialized == 1 && state.measured >= 2 && state.drawn > 0 && state.finalized == 1);
-        if (resource != 651) CHECK(state.beforeItems >= 1);
+        CHECK(state.beforeInit >= 1);
         CHECK(!ATL::detail::AxDialogCreation::Current());
     }
     for (bool modal : {false, true}) {
