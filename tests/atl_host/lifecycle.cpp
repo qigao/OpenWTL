@@ -274,6 +274,19 @@ bool uiHandlers() {
     REQUIRE(module.GetLockCount() == 0);
     return true;
 }
+struct PropertyState {
+    CLSID pageClass{};
+    IOleControlSite* site = nullptr;
+    IUnknown* identity = nullptr;
+    HWND owner = nullptr;
+    LCID locale = 0x0409;
+    HRESULT pagesResult = S_OK, activationResult = S_OK;
+    bool empty = false, malformed = false, destroyOnQuery = false, destroyOnPages = false;
+    bool cancel = false, captionFailure = false, good = true, reenter = true;
+    int queried = 0, captions = 0, created = 0, destroyed = 0, sites = 0, clearedSites = 0;
+    int bound = 0, unbound = 0, activated = 0, deactivated = 0, shown = 0, applied = 0, nested = 0;
+    LONG value = 9;
+};
 struct ControlState {
     CLSID classId{};
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
@@ -285,8 +298,10 @@ struct ControlState {
     HWND window = nullptr;
     int initialized = 0, loaded = 0, activated = 0, detached = 0, closed = 0, destroyed = 0;
     int storageLoaded = 0, storageReleased = 0, lateStorageReads = 0;
+    PropertyState* properties = nullptr;
 };
-class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage, public IRunnableObject {
+class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
+                public IRunnableObject, public ISpecifyPropertyPages {
 public:
     explicit Control(ControlState& state) : state_(state) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
@@ -299,6 +314,10 @@ public:
             if (state_.destroyDuringStorageQuery) ::DestroyWindow(state_.window);
         }
         else if (iid == IID_IRunnableObject) *value = static_cast<IRunnableObject*>(this);
+        else if (iid == IID_ISpecifyPropertyPages && state_.properties) {
+            *value = static_cast<ISpecifyPropertyPages*>(this);
+            if (state_.properties->destroyOnQuery) ::DestroyWindow(state_.window);
+        }
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
@@ -328,14 +347,44 @@ public:
     HRESULT STDMETHODCALLTYPE GetClipboardData(DWORD, IDataObject**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE DoVerb(LONG, LPMSG, IOleClientSite* site, LONG, HWND parent, LPCRECT) override {
         if (parent != state_.window || site != site_.p) return E_FAIL;
+        if (state_.properties) state_.properties->activationResult = state_.properties->site->ShowPropertyFrame();
         ++state_.activated; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE EnumVerbs(IEnumOLEVERB**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Update() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE IsUpToDate() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE GetUserClassID(CLSID* id) override { return GetClassID(id); }
-    HRESULT STDMETHODCALLTYPE GetUserType(DWORD, LPOLESTR*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE SetExtent(DWORD, SIZEL*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetUserType(DWORD type, LPOLESTR* output) override {
+        if (!state_.properties) return E_NOTIMPL;
+        if (!output) return E_POINTER; *output = nullptr;
+        auto& properties = *state_.properties; ++properties.captions;
+        properties.good = properties.good && type == USERCLASSTYPE_SHORT;
+        const WCHAR caption[] = L"OpenWTL control";
+        *output = static_cast<LPOLESTR>(::CoTaskMemAlloc(sizeof(caption)));
+        if (!*output) return E_OUTOFMEMORY;
+        std::memcpy(*output, caption, sizeof(caption));
+        return properties.captionFailure ? E_FAIL : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetExtent(DWORD aspect, SIZEL* value) override {
+        if (state_.properties && aspect == DVASPECT_CONTENT && value) state_.properties->value = value->cx;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPages(CAUUID* pages) override {
+        if (!pages) return E_POINTER;
+        auto& properties = *state_.properties; ++properties.queried;
+        *pages = {}; pages->cElems = properties.empty ? 0 : 1;
+        if (!properties.malformed) {
+            pages->pElems = static_cast<CLSID*>(::CoTaskMemAlloc(sizeof(CLSID)));
+            if (!pages->pElems) return E_OUTOFMEMORY;
+            pages->pElems[0] = properties.pageClass;
+        }
+        if (properties.reenter) {
+            ++properties.nested;
+            properties.good = properties.site->ShowPropertyFrame() == E_UNEXPECTED && properties.good;
+        }
+        if (properties.destroyOnPages) ::DestroyWindow(state_.window);
+        return properties.pagesResult;
+    }
     HRESULT STDMETHODCALLTYPE GetExtent(DWORD, SIZEL* size) override {
         if (!storage_) return E_NOTIMPL;
         if (!size) return E_POINTER;
@@ -454,6 +503,195 @@ struct Registration {
     DWORD cookie = 0;
     ~Registration() { if (cookie) ::CoRevokeClassObject(cookie); }
 };
+// Windows owns the property frame and its modal loop. The registered page is
+// repository-owned test UI; native SetObjects/Apply perform an actual COM edit.
+class PropertyPage : public IPropertyPage {
+public:
+    explicit PropertyPage(PropertyState& state) : state_(state) { ++state_.created; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER; *output = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IPropertyPage) return E_NOINTERFACE;
+        *output = static_cast<IPropertyPage*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { const auto count = --refs_; if (!count) delete this; return count; }
+    HRESULT STDMETHODCALLTYPE SetPageSite(IPropertyPageSite* site) override {
+        if (site && site_) return E_UNEXPECTED;
+        if (site) ++state_.sites; else if (site_) ++state_.clearedSites;
+        site_ = site; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Activate(HWND parent, LPCRECT rect, BOOL modal) override {
+        if (!rect) return E_POINTER;
+        if (window_ || !site_ || !object_) return E_UNEXPECTED;
+        state_.good = state_.good && modal && ::IsWindow(parent);
+        window_ = ::CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+            rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top,
+            parent, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+        if (!window_) return E_OUTOFMEMORY;
+        const HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+            8, 8, 100, 24, window_, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(771)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+        if (!edit) { ::DestroyWindow(window_); window_ = nullptr; return E_OUTOFMEMORY; }
+        ++state_.activated; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Deactivate() override {
+        if (window_) { ::DestroyWindow(window_); window_ = nullptr; ++state_.deactivated; }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPageInfo(PROPPAGEINFO* info) override {
+        if (!info) return E_POINTER;
+        *info = {}; info->cb = sizeof(*info); info->size = {220, 80};
+        const WCHAR title[] = L"OpenWTL native page";
+        info->pszTitle = static_cast<LPOLESTR>(::CoTaskMemAlloc(sizeof(title)));
+        if (!info->pszTitle) return E_OUTOFMEMORY;
+        std::memcpy(info->pszTitle, title, sizeof(title)); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetObjects(ULONG count, IUnknown** objects) override {
+        if (!count) {
+            if (object_) ++state_.unbound;
+            object_.Release(); return S_OK;
+        }
+        if (count != 1 || !objects || !objects[0] || object_) return E_INVALIDARG;
+        ATL::CComPtr<IUnknown> identity;
+        HRESULT hr = objects[0]->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity));
+        if (FAILED(hr)) return hr;
+        state_.good = state_.good && identity.p == state_.identity;
+        hr = objects[0]->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&object_));
+        if (SUCCEEDED(hr)) ++state_.bound;
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE Show(UINT command) override {
+        if (!window_) return E_UNEXPECTED;
+        if (command != SW_SHOW && command != SW_SHOWNORMAL && command != SW_HIDE) return E_INVALIDARG;
+        ::ShowWindow(window_, command);
+        if (command != SW_HIDE && !posted_) {
+            posted_ = true; ++state_.shown;
+            LCID locale = 0;
+            state_.good = site_->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
+            state_.good = ::SetDlgItemInt(window_, 771, 314, FALSE) && state_.good;
+            dirty_ = true; state_.good = site_->OnStatusChange(PROPPAGESTATUS_DIRTY) == S_OK && state_.good;
+            if (state_.reenter) {
+                ++state_.nested;
+                state_.good = state_.site->ShowPropertyFrame() == E_UNEXPECTED && state_.good;
+            }
+            const HWND frame = ::GetAncestor(window_, GA_ROOT);
+            state_.good = ::GetAncestor(frame, GA_ROOTOWNER) == state_.owner && state_.good;
+            const HWND button = ::GetDlgItem(frame, state_.cancel ? IDCANCEL : IDOK);
+            if (!button || !::PostMessageW(button, BM_CLICK, 0, 0)) {
+                state_.good = false; ::PostMessageW(frame, WM_CLOSE, 0, 0);
+            }
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Move(LPCRECT rect) override {
+        if (!rect) return E_POINTER;
+        if (window_) ::MoveWindow(window_, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, TRUE);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE IsPageDirty() override { return dirty_ ? S_OK : S_FALSE; }
+    HRESULT STDMETHODCALLTYPE Apply() override {
+        if (!window_ || !object_) return E_UNEXPECTED;
+        BOOL valid = FALSE;
+        SIZEL value{static_cast<LONG>(::GetDlgItemInt(window_, 771, &valid, FALSE)), 1};
+        if (!valid) return E_FAIL;
+        const HRESULT hr = object_->SetExtent(DVASPECT_CONTENT, &value);
+        if (SUCCEEDED(hr)) { dirty_ = false; ++state_.applied; }
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE Help(LPCOLESTR) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(MSG* message) override {
+        if (!message) return E_POINTER;
+        return window_ && ::IsDialogMessageW(window_, message) ? S_OK : S_FALSE;
+    }
+private:
+    ~PropertyPage() { if (::IsWindow(window_)) ::DestroyWindow(window_); ++state_.destroyed; }
+    ULONG refs_ = 1;
+    PropertyState& state_;
+    ATL::CComPtr<IPropertyPageSite> site_;
+    ATL::CComPtr<IOleObject> object_;
+    HWND window_ = nullptr;
+    bool dirty_ = false, posted_ = false;
+};
+class PageFactory : public IClassFactory {
+public:
+    explicit PageFactory(PropertyState& state) : state_(state) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER; *output = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IClassFactory) return E_NOINTERFACE;
+        *output = static_cast<IClassFactory*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { const auto count = --refs_; if (!count) delete this; return count; }
+    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* outer, REFIID iid, void** output) override {
+        if (!output) return E_POINTER; *output = nullptr;
+        if (outer) return CLASS_E_NOAGGREGATION;
+        auto page = new (std::nothrow) PropertyPage(state_);
+        if (!page) return E_OUTOFMEMORY;
+        const HRESULT hr = page->QueryInterface(iid, output); page->Release(); return hr;
+    }
+    HRESULT STDMETHODCALLTYPE LockServer(BOOL) override { return S_OK; }
+private:
+    ULONG refs_ = 1;
+    PropertyState& state_;
+};
+bool propertyFrames() {
+    ATL::CAtlModule module;
+    PropertyState properties;
+    CLSID pageClass{}; REQUIRE(::CoCreateGuid(&pageClass) == S_OK);
+    ATL::CComPtr<IClassFactory> factory; factory.Attach(new PageFactory(properties));
+    Registration registration;
+    REQUIRE(::CoRegisterClassObject(pageClass, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
+    for (int scenario = 0; scenario < 10; ++scenario) {
+        properties = PropertyState{}; properties.pageClass = pageClass;
+        properties.empty = scenario == 1; properties.pagesResult = scenario == 2 ? E_ACCESSDENIED : scenario == 6 ? S_FALSE : S_OK;
+        properties.malformed = scenario == 3; properties.destroyOnQuery = scenario == 4; properties.destroyOnPages = scenario == 5;
+        properties.cancel = scenario == 8; properties.captionFailure = scenario == 9;
+        ControlState state; state.properties = scenario == 0 ? nullptr : &properties;
+        OwnedWindow<ATL::CAxWindow> window;
+        RECT rect{0,0,100,100}; REQUIRE(window.Create(nullptr, &rect, nullptr, WS_POPUP));
+        state.window = properties.owner = window;
+        ATL::CComPtr<IOleControlSite> site; REQUIRE(window.QueryHost(&site) == S_OK); properties.site = site;
+        REQUIRE(site->ShowPropertyFrame() == E_NOINTERFACE);
+        ATL::CComPtr<IAxWinAmbientDispatch> ambient; REQUIRE(window.QueryHost(&ambient) == S_OK);
+        REQUIRE(ambient->put_LocaleID(properties.locale) == S_OK);
+        auto control = new Control(state); properties.identity = static_cast<IOleObject*>(control);
+        REQUIRE(window.AttachControl(static_cast<IOleObject*>(control)) == S_OK); control->Release();
+        if (state.properties) REQUIRE(properties.activationResult == E_UNEXPECTED);
+        HRESULT foreign = S_OK;
+        std::thread thread([&] { foreign = site->ShowPropertyFrame(); }); thread.join();
+        REQUIRE(foreign == RPC_E_WRONG_THREAD && properties.queried == 0);
+        if (scenario == 7) {
+            properties.pagesResult = E_ACCESSDENIED;
+            REQUIRE(site->ShowPropertyFrame() == E_ACCESSDENIED && properties.good && properties.queried == 1 && properties.created == 0);
+            properties.pagesResult = S_OK; properties.queried = 0; properties.nested = 0;
+        }
+        if (properties.cancel) ::EnableWindow(window, FALSE);
+        const BOOL enabled = ::IsWindowEnabled(window);
+        const HRESULT result = site->ShowPropertyFrame();
+        const HRESULT expected = scenario == 0 ? E_NOINTERFACE : scenario == 1 ? E_NOTIMPL : scenario == 2 ? E_ACCESSDENIED :
+            scenario == 3 || scenario == 6 ? E_UNEXPECTED : scenario == 4 || scenario == 5 ? E_ABORT : S_OK;
+        REQUIRE(result == expected && properties.good);
+        REQUIRE(properties.queried == (scenario == 0 || scenario == 4 ? 0 : 1));
+        if (scenario >= 7) {
+            REQUIRE(properties.created > 0 && properties.created == properties.destroyed && properties.activated > 0 &&
+                properties.activated == properties.deactivated && properties.bound > 0 && properties.bound == properties.unbound &&
+                properties.sites == properties.clearedSites && properties.shown == 1 && properties.nested == 2 && properties.captions == 1);
+            REQUIRE(properties.applied == (properties.cancel ? 0 : 1) && properties.value == (properties.cancel ? 9 : 314));
+            REQUIRE(::IsWindowEnabled(window) == enabled);
+            // A second native modal frame proves that the operation guard was released.
+            const int prior = properties.created;
+            REQUIRE(site->ShowPropertyFrame() == S_OK && properties.good && properties.created > prior && properties.created == properties.destroyed);
+        } else REQUIRE(properties.created == 0 && properties.applied == 0);
+        if (scenario == 4 || scenario == 5) {
+            REQUIRE(state.destroyed == 1 && !::IsWindow(window) && site->ShowPropertyFrame() == CO_E_OBJNOTCONNECTED);
+            window.m_hWnd = nullptr;
+        } else {
+            REQUIRE(state.destroyed == 0 && window.DestroyWindow() && state.destroyed == 1);
+            window.m_hWnd = nullptr;
+        }
+    }
+    REQUIRE(module.GetLockCount() == 0);
+    return true;
+}
 bool creation() {
     ControlState state;
     CLSID classId{}; REQUIRE(::CoCreateGuid(&classId) == S_OK);
@@ -730,7 +968,8 @@ bool RunHostLifecycleTests() {
     const bool active = accelerators();
     const bool resources = resourceInitialization();
     const bool ui = uiHandlers();
-    return created && active && resources && ui;
+    const bool properties = propertyFrames();
+    return created && active && resources && ui && properties;
 }
 bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
     UIState state; state.browser = true;

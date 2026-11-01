@@ -431,7 +431,45 @@ public:
         return active ? active->TranslateAccelerator(msg) : S_FALSE;
     }
     HRESULT STDMETHODCALLTYPE OnFocus(BOOL) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE ShowPropertyFrame() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE ShowPropertyFrame() override {
+        HRESULT hr = CheckWindow(); if (FAILED(hr)) return hr;
+        if (creating_ || closing_ || propertyFrame_) return E_UNEXPECTED;
+        if (!control_) return E_NOINTERFACE;
+        CComPtr<IUnknown> keep(static_cast<IOleClientSite*>(this));
+        struct Showing {
+            bool& value;
+            explicit Showing(bool& flag) : value(flag) { value = true; }
+            ~Showing() { value = false; }
+        } showing(propertyFrame_);
+        const HWND owner = window_;
+        const LCID locale = locale_;
+        CComPtr<IOleObject> control = control_;
+        const auto current = [&] { return SUCCEEDED(CheckWindow()) && control_.p == control.p; };
+        CComPtr<ISpecifyPropertyPages> provider;
+        hr = control->QueryInterface(IID_ISpecifyPropertyPages, reinterpret_cast<void**>(&provider));
+        if (FAILED(hr)) return hr;
+        if (!current()) return E_ABORT;
+        if (!provider) return E_UNEXPECTED;
+        struct Metadata {
+            CAUUID pages{};
+            LPOLESTR caption = nullptr;
+            ~Metadata() { ::CoTaskMemFree(caption); ::CoTaskMemFree(pages.pElems); }
+        } metadata;
+        hr = provider->GetPages(&metadata.pages);
+        if (hr != S_OK) return FAILED(hr) ? hr : E_UNEXPECTED;
+        if (!current()) return E_ABORT;
+        if (!metadata.pages.cElems) return E_NOTIMPL;
+        if (!metadata.pages.pElems) return E_UNEXPECTED;
+        // The short class name is optional display metadata. Its allocator is
+        // still owned even if the control reports failure after filling it.
+        const HRESULT captionResult = control->GetUserType(USERCLASSTYPE_SHORT, &metadata.caption);
+        if (!current()) return E_ABORT;
+        IUnknown* object = control.p;
+        const LPCOLESTR caption = SUCCEEDED(captionResult) && metadata.caption ? metadata.caption : L"Properties";
+        hr = ::OleCreatePropertyFrame(owner, 0, 0, caption,
+            1, &object, metadata.pages.cElems, metadata.pages.pElems, locale, 0, nullptr);
+        return SUCCEEDED(hr) && !current() ? E_ABORT : hr;
+    }
 
     HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo** info) override { if (info) *info = nullptr; return DISP_E_BADINDEX; }
@@ -544,6 +582,7 @@ private:
     DWORD thread_;
     bool creating_ = false;
     bool closing_ = false;
+    bool propertyFrame_ = false;
     CComPtr<IOleObject> control_;
     CComPtr<IOleInPlaceActiveObject> active_;
     CComPtr<IDispatch> external_;

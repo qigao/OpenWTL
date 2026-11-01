@@ -31,8 +31,8 @@
 #endif
 #endif
 
-// Implicit resource-based ActiveX dialogs/property pages are still pending.
-// Explicit windowed containment is implemented separately in atlhost.h;
+// The full implicit ATL control/property-page framework is still pending.
+// Explicit windowed containment and resource dialogs live in atlhost.h;
 // ordinary UI headers never initialize a COM apartment or a hosted control.
 #ifndef _ATL_NO_HOSTING
 #define _ATL_NO_HOSTING 1

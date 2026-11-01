@@ -108,5 +108,14 @@ generated or registered by the host. `CAxWindow::SetExternalDispatch` supplies
 the default external object when no UI handler is installed. Setters belong to
 the window thread; retained host interfaces may clear these objects after HWND
 retirement. See [external host UI](ATL_COMPATIBILITY.md#external-host-ui).
+`IOleControlSite::ShowPropertyFrame` obtains the current control's native
+`ISpecifyPropertyPages` list and displays it with Windows OleCreatePropertyFrame.
+Windows owns the modal frame, page activation, Apply and Cancel. The operation
+retains the host/control, rejects recursive display and creation-time calls,
+checks retirement after external calls and releases native page-list/title
+allocations on every exit. An absent page interface propagates E_NOINTERFACE;
+an empty list returns E_NOTIMPL so the control can choose its own UI.
+The full ATL property-page class/property-map framework remains unfinished.
+See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
