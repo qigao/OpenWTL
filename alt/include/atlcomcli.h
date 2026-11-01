@@ -422,7 +422,16 @@ public:
         return done == stored ? S_OK : STG_E_WRITEFAULT;
     }
 
+    // All reads use a finite default budget, including the legacy signature.
+    // Applications with a larger trusted record may opt in explicitly.
+    static constexpr ULONG kDefaultStreamByteBudget = 16u * 1024u * 1024u;
+
     HRESULT ReadFromStream(IStream* stream) noexcept
+    {
+        return ReadFromStream(stream, kDefaultStreamByteBudget);
+    }
+
+    HRESULT ReadFromStream(IStream* stream, ULONG maxPayloadBytes) noexcept
     {
         if (!stream) return E_POINTER;
         ULONG stored = 0, done = 0;
@@ -432,6 +441,10 @@ public:
         if (!stored) { Empty(); return S_OK; }
         if (stored < sizeof(OLECHAR)) return E_FAIL;
         const ULONG bytes = stored - sizeof(OLECHAR);
+        // Count comes from the stream, not the actual remaining data size.
+        // Reject it before allocating or reading the payload.
+        if (bytes > maxPayloadBytes)
+            return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
         BSTR staged = ::SysAllocStringByteLen(nullptr, bytes);
         if (!staged) return E_OUTOFMEMORY;
         done = 0;
@@ -767,6 +780,12 @@ public:
 
     HRESULT ReadFromStream(IStream* stream) noexcept
     {
+        return ReadFromStream(stream, CComBSTR::kDefaultStreamByteBudget);
+    }
+
+    // maxBstrPayloadBytes is in bytes, excluding the wire terminator.
+    HRESULT ReadFromStream(IStream* stream, ULONG maxBstrPayloadBytes) noexcept
+    {
         if (!stream) return E_POINTER;
         VARTYPE type = VT_EMPTY;
         ULONG done = 0;
@@ -778,7 +797,7 @@ public:
         CComVariant staged;
         if (type == VT_BSTR) {
             CComBSTR text;
-            hr = text.ReadFromStream(stream);
+            hr = text.ReadFromStream(stream, maxBstrPayloadBytes);
             if (FAILED(hr)) return hr;
             staged.vt = VT_BSTR;
             staged.bstrVal = text.Detach();
