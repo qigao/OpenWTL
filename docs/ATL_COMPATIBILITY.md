@@ -1135,4 +1135,3 @@ stream sizes before invoking this allocation-based API.
 This is the first subset of #94. VARIANT streams, property-map stream
 persistence and IPersistStreamInitImpl remain unimplemented. #95–#97 are
 reactivated independent tracks, not completed by these primitives.
-
