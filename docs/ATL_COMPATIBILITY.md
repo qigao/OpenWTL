@@ -603,12 +603,39 @@ DialogBoxIndirectParamW; unchanged resources retain their original native path.
 
 Malformed/truncated templates and malformed brace-prefixed CLSID classes fail
 ERROR_INVALID_DATA. Nonempty placeholder titles or inline ActiveX creation data,
-DLGINIT stream/license records and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
+DLGINIT records other than stream loading and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
 Unknown ordinary native child classes fail through Windows.
-Unimplemented resource initialization is not silently skipped. Full resource
-editor persistence/licensing, full control-splitting/property pages, advanced OLE
+Unimplemented resource initialization is not silently skipped. Storage and data
+binding persistence, full control-splitting/property pages, advanced OLE
 accelerators and full composite controls remain open. Header-independent and
 exact internal layout compatibility remain unqualified.
+
+DLGINIT stream records (message 0x0376) are bounded by the resource size. Each
+record has a WORD control ID, WORD message and DWORD payload length, followed
+by a DWORD UTF-16 license character count, that many characters (no terminator),
+and the opaque persisted bytes. A zero WORD terminates the resource; up to three
+zero padding bytes are accepted. The license is a counted BSTR, including any
+embedded zero characters. An absent key uses normal factory creation. Duplicate
+records, missing/non-host control IDs, duplicate matching dialog IDs, truncated
+headers/payloads/keys and nonzero trailing data fail ERROR_INVALID_DATA before
+any window is created. Storage, INITNEW, data-binding extension and ordinary
+list/combo initialization messages currently fail ERROR_NOT_SUPPORTED.
+
+For records with persisted data, conversion creates an empty AxWin child. A
+private dialog procedure loads the matching controls in dialog order before
+forwarding WM_INITDIALOG with the caller's original parameter. It uses a native
+IStream positioned at the first persisted byte, then the existing host's
+IPersistStreamInit::Load (or IPersistStream fallback) and licensed factory path.
+It does not call InitNew before Load. Initialization failure destroys the native
+dialog and every partial host, skips the application initializer and reports
+failure. Loading that destroys a host or dialog is also a failed creation.
+Successful initialization hands the native dialog procedure slot to the caller;
+CAxDialogImpl then binds its usual thunk and sink map. There is no dialog-context
+registry or retained pointer into a temporary resource. This path deliberately
+initializes after all native children exist; it does not claim ATL's exact
+WM_CREATE callback sequence or inline creation-data format. Early application
+dialog callbacks before WM_INITDIALOG are not forwarded on this path. Resources
+without stream records retain the existing creation path.
 
 Existing ActiveX cases embed own standard/extended and named dialog resources.
 Plain dialogs verify modal/modeless parameters, reuse, failure/close retry,
@@ -627,7 +654,20 @@ both modal/modeless paths and cleanup after a later converted control fails.
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
+Native persistence: [IPersistStreamInit::Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-load),
+[IClassFactory2::CreateInstanceLic](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iclassfactory2-createinstancelic).
+A Microsoft-published [resource example](https://download.microsoft.com/download/1/6/d/16d24ada-5317-4de1-b2b2-890b51813d6e/VS2005_DeviceDev_en-us.pdf)
+contains a 0x0376 record; it is format evidence, not a newly admitted application.
 Wire formats: [standard header](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-dlgtemplate),
 [standard item](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-dlgitemtemplate),
 [extended header](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgtemplateex),
 [extended item](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgitemtemplateex).
+
+The existing lifecycle case additionally registers an own IClassFactory2 control
+and uses compiled standard/extended DLGINIT resources. It verifies counted keys,
+Load instead of InitNew, exact stream lengths including an odd final byte, both
+client-site orders, IPersistStream fallback, modal/modeless parameters and
+cleanup, owner reuse, failed license/load, rollback after a later control fails,
+and reentrant host/dialog destruction. The existing pre-OLE resource checks cover
+bounds, malformed records, ID matching, dialog-order loading and empty DLGINIT
+without creating an apartment. No original application admission is inferred.

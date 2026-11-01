@@ -485,11 +485,11 @@ inline BOOL PrepareAxDialog(HINSTANCE instance, LPCWSTR name, AxDialogTemplate& 
     const DWORD size = ::SizeofResource(instance, resource);
     const HGLOBAL loaded = ::LoadResource(instance, resource);
     const auto bytes = static_cast<const BYTE*>(::LockResource(loaded));
-    // Stream/license initialization remains unsupported and is never omitted.
-    if (::FindResourceW(instance, name, MAKEINTRESOURCEW(240))) {
-        ::SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
-    }
-    const DWORD error = BuildAxDialogTemplate(bytes, size, prepared);
+    const HRSRC initResource = ::FindResourceW(instance, name, MAKEINTRESOURCEW(240));
+    const DWORD initSize = initResource ? ::SizeofResource(instance, initResource) : 0;
+    const void* init = initResource ? ::LockResource(::LoadResource(instance, initResource)) : nullptr;
+    if (initResource && !init) { ::SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    const DWORD error = BuildAxDialogTemplate(bytes, size, prepared, init, initSize);
     if (error) { ::SetLastError(error); return FALSE; }
     return AtlAxWinInit();
 }
@@ -499,6 +499,62 @@ inline DWORD AxDialogError(HRESULT hr) noexcept {
     if (hr == E_POINTER || hr == E_INVALIDARG) return ERROR_INVALID_PARAMETER;
     return ERROR_GEN_FAILURE;
 }
+struct AxDialogCreation {
+    AxDialogTemplate& prepared;
+    DLGPROC procedure;
+    LPARAM parameter;
+    bool modal;
+    DWORD error = ERROR_SUCCESS;
+    HRESULT Initialize(HWND dialog) noexcept {
+        for (const auto& record : prepared.initialization) {
+            const HWND child = ::GetDlgItem(dialog, record.id);
+            if (!child) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+            CComPtr<IStream> stream;
+            HRESULT hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+            if (FAILED(hr)) return hr;
+            ULONG written = 0;
+            if (!record.stream.empty()) {
+                hr = stream->Write(record.stream.data(), static_cast<ULONG>(record.stream.size()), &written);
+                if (FAILED(hr)) return hr;
+                if (written != record.stream.size()) return STG_E_WRITEFAULT;
+            }
+            LARGE_INTEGER start{};
+            hr = stream->Seek(start, STREAM_SEEK_SET, nullptr);
+            if (FAILED(hr)) return hr;
+            CComBSTR license;
+            if (!record.license.empty()) {
+                license.Attach(::SysAllocStringLen(record.license.data(), static_cast<UINT>(record.license.size())));
+                if (!license.m_str) return E_OUTOFMEMORY;
+            }
+            CComPtr<AxHost> host;
+            hr = GetAxHost(child, &host, false);
+            if (SUCCEEDED(hr)) hr = host->CreateNamedControl(record.name.c_str(), child, stream, nullptr, IID_NULL, nullptr, license);
+            if (FAILED(hr)) return hr;
+            if (!::IsWindow(dialog) || !::IsWindow(child) || ::GetParent(child) != dialog) return E_ABORT;
+        }
+        return S_OK;
+    }
+    static INT_PTR CALLBACK DialogProc(HWND window, UINT message, WPARAM w, LPARAM l) noexcept {
+        // Keep application callbacks out of the initialization transaction. The
+        // native dialog manager creates all ordinary children first.
+        if (message != WM_INITDIALOG) return FALSE;
+        auto& creation = *reinterpret_cast<AxDialogCreation*>(l);
+        HRESULT hr = creation.Initialize(window);
+        if (SUCCEEDED(hr)) {
+            ::SetLastError(ERROR_SUCCESS);
+            const LONG_PTR previous = ::SetWindowLongPtrW(window, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(creation.procedure));
+            if (!previous && ::GetLastError()) hr = HRESULT_FROM_WIN32(::GetLastError());
+        }
+        if (FAILED(hr)) {
+            creation.error = AxDialogError(hr);
+            if (::IsWindow(window)) {
+                if (creation.modal) ::EndDialog(window, -1); else ::DestroyWindow(window);
+            }
+            return FALSE;
+        }
+        return creation.procedure ? creation.procedure(window, message, w, creation.parameter) : FALSE;
+    }
+};
 template<class T, class = void> struct HasAxSinkMap : std::false_type {};
 template<class T> struct HasAxSinkMap<T, std::void_t<decltype(T::_GetSinkMap())>> : std::true_type {};
 }
@@ -506,6 +562,13 @@ inline HWND WINAPI AtlAxCreateDialog(HINSTANCE instance, LPCWSTR name, HWND pare
     DLGPROC procedure, LPARAM parameter) noexcept {
     detail::AxDialogTemplate prepared;
     if (!detail::PrepareAxDialog(instance, name, prepared)) return nullptr;
+    if (!prepared.initialization.empty()) {
+        detail::AxDialogCreation creation{prepared, procedure, parameter, false};
+        const HWND window = ::CreateDialogIndirectParamW(instance, prepared.Get(), parent,
+            detail::AxDialogCreation::DialogProc, reinterpret_cast<LPARAM>(&creation));
+        if (creation.error) { ::SetLastError(creation.error); return nullptr; }
+        return window;
+    }
     if (prepared.converted) return ::CreateDialogIndirectParamW(instance, prepared.Get(), parent, procedure, parameter);
     return ::CreateDialogParamW(instance, name, parent, procedure, parameter);
 }
@@ -513,6 +576,13 @@ inline int WINAPI AtlAxDialogBox(HINSTANCE instance, LPCWSTR name, HWND parent,
     DLGPROC procedure, LPARAM parameter) noexcept {
     detail::AxDialogTemplate prepared;
     if (!detail::PrepareAxDialog(instance, name, prepared)) return -1;
+    if (!prepared.initialization.empty()) {
+        detail::AxDialogCreation creation{prepared, procedure, parameter, true};
+        const int result = static_cast<int>(::DialogBoxIndirectParamW(instance, prepared.Get(), parent,
+            detail::AxDialogCreation::DialogProc, reinterpret_cast<LPARAM>(&creation)));
+        if (creation.error) { ::SetLastError(creation.error); return -1; }
+        return result;
+    }
     if (prepared.converted) return static_cast<int>(::DialogBoxIndirectParamW(instance, prepared.Get(), parent, procedure, parameter));
     return static_cast<int>(::DialogBoxParamW(instance, name, parent, procedure, parameter));
 }

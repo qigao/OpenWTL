@@ -82,6 +82,46 @@ bool dialogTemplates() {
             CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA);
         }
     }
+    for (WORD id : {WORD(610), WORD(611), WORD(612), WORD(614), WORD(619)}) {
+        const HRSRC dialog = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        const HRSRC init = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(dialog && init);
+        const auto bytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, dialog)));
+        const auto initBytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, init)));
+        const DWORD size = ::SizeofResource(instance, dialog), initSize = ::SizeofResource(instance, init);
+        const std::vector<BYTE> snapshot(initBytes, initBytes + initSize);
+        AxDialogTemplate built;
+        CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, initSize) == ERROR_SUCCESS && built.converted);
+        CHECK(built.initialization.size() == (id == 614 ? 2U : 1U));
+        CHECK(built.initialization[0].id == 711 && built.initialization[0].stream.size() == (id == 619 ? 5U : 4U));
+        CHECK(built.initialization[0].license == ((id == 612 || id == 619) ? L"OpenATL-test-license" : L""));
+        CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        for (size_t cut = 0; cut + 3 < initSize; ++cut) {
+            CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
+        }
+        std::vector<BYTE> bad = snapshot;
+        const DWORD oversized = MAXDWORD;
+        std::memcpy(bad.data() + 4, &oversized, sizeof(oversized));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; std::memcpy(bad.data() + 8, &oversized, sizeof(oversized));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; const WORD unmatched = 799;
+        std::memcpy(bad.data(), &unmatched, sizeof(unmatched));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; const WORD storage = 0x377;
+        std::memcpy(bad.data() + 2, &storage, sizeof(storage));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_NOT_SUPPORTED);
+        bad = snapshot; bad.push_back(1);
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        if (id == 614) {
+            // Resource order may differ from dialog order; initialization follows
+            // the dialog's child order, including for reentrant controls.
+            std::swap_ranges(bad.begin(), bad.begin() + 16, bad.begin() + 16);
+            bad.resize(snapshot.size());
+            CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_SUCCESS);
+            CHECK(built.initialization[0].id == 711 && built.initialization[1].id == 712);
+        }
+    }
     return true;
 }
 struct FreeDialogState { bool modal = false; int initialized = 0; HWND window = nullptr; };
@@ -163,9 +203,19 @@ bool plainDialogs() {
     CHECK(ATL::AtlAxDialogBox(instance, L"OPENATL_PLAIN", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free)) == 83 && free.initialized == 2);
     CHECK(!ATL::AtlAxCreateDialog(instance, nullptr, nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_INVALID_PARAMETER);
     CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(999), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() != ERROR_SUCCESS);
-    for (WORD id : {WORD(604), WORD(605), WORD(609)}) {
+    free = {};
+    window = ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(605), nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free));
+    CHECK(window && free.initialized == 1 && ::DestroyWindow(window));
+    free.modal = true;
+    CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(605), nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free)) == 83 && free.initialized == 2);
+    for (WORD id : {WORD(604), WORD(609)}) {
         CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_NOT_SUPPORTED);
         CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == ERROR_NOT_SUPPORTED);
+    }
+    for (WORD id : {WORD(615), WORD(616), WORD(617), WORD(618)}) {
+        const DWORD error = id == 617 ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA;
+        CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == error);
+        CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == error);
     }
     PlainDialog plain; plain.modal = true;
     CHECK(plain.GetIDD() == 602 && plain.GetDialogProc());
