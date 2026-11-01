@@ -541,6 +541,8 @@ returned and the retained connection can be retried through Unadvise. Unadvise
 uses each sink's retained connection point, without querying changed or missing
 child controls; it attempts all groups, returns the first failure and preserves
 failed subscriptions for retry. Already disconnected groups are harmless.
+Unexpected success codes from a connected source's Unadvise fail E_UNEXPECTED;
+they are not confused with an already disconnected sink.
 Recursive map operations on one owner fail E_UNEXPECTED. No global binding
 registry, implicit COM initialization or automatic owner deletion is added.
 

@@ -640,8 +640,9 @@ template<UINT id, class T> struct SinkMapBinding {
         CComPtr<IConnectionPointContainer> owner;
         const HRESULT hr = sink->point_->GetConnectionPointContainer(&owner.p);
         if (FAILED(hr)) return hr;
-        if (!owner.p) return E_UNEXPECTED;
-        return sink->DispEventUnadvise(owner.p, &IID_NULL);
+        if (hr != S_OK || !owner.p) return E_UNEXPECTED;
+        const HRESULT disconnected = sink->DispEventUnadvise(owner.p, &IID_NULL);
+        return disconnected == S_OK || FAILED(disconnected) ? disconnected : E_UNEXPECTED;
     }
 };
 }

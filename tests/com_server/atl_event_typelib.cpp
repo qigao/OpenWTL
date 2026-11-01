@@ -51,7 +51,7 @@ public:
         }
         return hr;
     }
-    HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) override { return FAILED(disconnect) ? disconnect : Point::Unadvise(cookie); }
+    HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) override { return disconnect != S_OK ? disconnect : Point::Unadvise(cookie); }
     HRESULT Fire(DISPID member, DISPPARAMS& params, UINT* argument = nullptr) {
         ATL::CComPtr<IEnumConnections> snapshot;
         HRESULT hr = Point::EnumConnections(&snapshot.p);
@@ -413,6 +413,8 @@ bool MapBinding() {
     first->disconnect = E_ABORT;
     EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == E_ABORT && left.m_dwEventCookie != 0xFEFEFEFE);
     EVENT_CHECK(left.GetTypeInfo(0, 0, &info.p) == S_OK && info.p); info.Release();
+    first->disconnect = S_FALSE;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == E_UNEXPECTED && left.m_dwEventCookie != 0xFEFEFEFE);
     first->disconnect = S_OK; sink.first = nullptr; sink.second = nullptr; sink.lookupSecond = E_ACCESSDENIED;
     const int lookups = sink.lookups;
     EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK && sink.lookups == lookups);
