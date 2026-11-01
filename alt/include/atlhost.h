@@ -522,9 +522,7 @@ struct AxDialogCreation {
     UINT_PTR Key() const noexcept { return reinterpret_cast<UINT_PTR>(this); }
     void Detach() noexcept {
         if (subclassed && window && ::IsWindow(window)) {
-            DWORD_PTR data = 0;
-            if (::GetWindowSubclass(window, Subclass, Key(), &data) && data == reinterpret_cast<DWORD_PTR>(this) &&
-                !::RemoveWindowSubclass(window, Subclass, Key())) std::terminate();
+            if (!::RemoveWindowSubclass(window, Subclass, Key())) std::terminate();
         }
         subclassed = false;
     }
