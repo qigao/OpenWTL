@@ -314,6 +314,125 @@ public:
         MESSAGE_HANDLER(WM_INITDIALOG, Init)
     END_MSG_MAP()
 };
+struct OwnerDrawState {
+    int initialized = 0, measured = 0, listMeasured = 0, beforeInit = 0, drawn = 0, finalized = 0, deleted = 0;
+    bool good = true, modal = false, nested = false, cancel = false, deleteOnFinal = false, recursiveInit = false;
+    int resource = 649;
+};
+class OwnerDrawDialog : public ATL::CAxDialogImpl<OwnerDrawDialog> {
+    OwnerDrawState& state_;
+    bool nested_ = false;
+public:
+    enum { IDD = 649 };
+    explicit OwnerDrawDialog(OwnerDrawState& state) : state_(state) {}
+    ~OwnerDrawDialog() { ++state_.deleted; }
+    int GetIDD() const { return state_.resource; }
+    LRESULT Measure(UINT, WPARAM w, LPARAM l, BOOL&) {
+        auto item = reinterpret_cast<MEASUREITEMSTRUCT*>(l);
+        state_.good = state_.good && item && item->CtlID == w && (item->CtlID == 711 || item->CtlID == 712);
+        if (!item) return FALSE;
+        ++state_.measured;
+        if (item->CtlID == 711) ++state_.listMeasured;
+        // Fixed-height measurement can run while the child is still being
+        // created. Query its contents only after dialog initialization.
+        if (!state_.initialized) ++state_.beforeInit;
+        item->itemWidth = 80; item->itemHeight = 21;
+        if (state_.nested && !nested_) {
+            nested_ = true;
+            const auto creation = ATL::detail::AxDialogCreation::Current();
+            PlainDialog nested; nested.resource = 637; nested.modal = true;
+            state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 &&
+                ATL::detail::AxDialogCreation::Current() == creation && state_.good;
+        }
+        if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && state_.listMeasured == 2 && !state_.initialized)
+            ::SendMessageW(m_hWnd, WM_INITDIALOG, 0, 0);
+        return TRUE;
+    }
+    LRESULT Draw(UINT, WPARAM, LPARAM l, BOOL&) {
+        auto item = reinterpret_cast<DRAWITEMSTRUCT*>(l);
+        if (!item || (item->CtlID != 711 && item->CtlID != 712)) return FALSE;
+        ++state_.drawn;
+        ::FillRect(item->hDC, &item->rcItem, ::GetSysColorBrush(COLOR_WINDOW));
+        if (item->itemID != static_cast<UINT>(-1)) {
+            WCHAR text[32]{};
+            const LRESULT count = ::SendMessageW(item->hwndItem, item->CtlID == 711 ? LB_GETTEXT : CB_GETLBTEXT,
+                item->itemID, reinterpret_cast<LPARAM>(text));
+            state_.good = state_.good && count >= 0 && count < 32;
+            if (count >= 0 && count < 32) ::TextOutW(item->hDC, item->rcItem.left + 2, item->rcItem.top, text, static_cast<int>(count));
+        }
+        return TRUE;
+    }
+    bool Paint() {
+        const int before = state_.drawn;
+        HDC dc = ::CreateCompatibleDC(nullptr);
+        BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 320; info.bmiHeader.biHeight = -240;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        void* pixels = nullptr;
+        HBITMAP bitmap = dc ? ::CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+        if (!bitmap) { if (dc) ::DeleteDC(dc); return false; }
+        HGDIOBJ previous = ::SelectObject(dc, bitmap);
+        ::SendMessageW(::GetDlgItem(m_hWnd, 711), WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
+        ::SelectObject(dc, previous); ::DeleteObject(bitmap); ::DeleteDC(dc);
+        return state_.drawn > before;
+    }
+    LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
+        ++state_.initialized;
+        const HWND list = ::GetDlgItem(m_hWnd, 711), combo = ::GetDlgItem(m_hWnd, 712);
+        WCHAR text[32]{};
+        state_.good = state_.good && parameter == 1773 && state_.measured > 0 &&
+            ::SendMessageW(list, LB_GETCOUNT, 0, 0) == 2 && ::SendMessageW(combo, CB_GETCOUNT, 0, 0) == 2;
+        state_.good = state_.good && ::SendMessageW(list, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(text)) == 5 && !::wcscmp(text, L"alpha");
+        state_.good = state_.good && ::SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, L"low");
+        state_.good = state_.good && ::SendMessageW(list, LB_GETITEMHEIGHT, 0, 0) == 21 && ::SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0) == 21;
+        state_.good = Paint() && state_.good;
+        if (state_.modal) EndDialog(93);
+        else if (state_.cancel) DestroyWindow();
+        return TRUE;
+    }
+    void OnFinalMessage(HWND) override {
+        ++state_.finalized;
+        if (state_.deleteOnFinal) delete this;
+    }
+    BEGIN_MSG_MAP(OwnerDrawDialog)
+        MESSAGE_HANDLER(WM_MEASUREITEM, Measure)
+        MESSAGE_HANDLER(WM_DRAWITEM, Draw)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+bool ownerDrawDialogs() {
+    for (int resource : {649, 650, 651}) for (bool modal : {false, true}) {
+        OwnerDrawState state; state.resource = resource; state.modal = modal;
+        state.nested = true; state.recursiveInit = resource == 651;
+        OwnerDrawDialog dialog(state);
+        if (modal) CHECK(dialog.DoModal(nullptr, 1773) == 93);
+        else {
+            CHECK(dialog.Create(nullptr, 1773));
+            CHECK(dialog.Paint()); // The creation context must already have detached.
+            CHECK(dialog.DestroyWindow());
+        }
+        CHECK(state.good && state.initialized == 1 && state.measured >= 2 && state.drawn > 0 && state.finalized == 1);
+        CHECK(state.beforeInit >= 1);
+        CHECK(!ATL::detail::AxDialogCreation::Current());
+    }
+    for (bool modal : {false, true}) {
+        OwnerDrawState state; state.modal = modal; state.cancel = true;
+        OwnerDrawDialog dialog(state);
+        if (modal) CHECK(dialog.DoModal(nullptr, 1773) == 93);
+        else CHECK(!dialog.Create(nullptr, 1773));
+        CHECK(state.good && state.measured >= 2 && state.initialized == 1 && state.finalized == 1 && !dialog.m_hWnd);
+        if (!modal) CHECK(::GetLastError() == ERROR_CANCELLED);
+        CHECK(!ATL::detail::AxDialogCreation::Current());
+        state.cancel = false; state.modal = false;
+        CHECK(dialog.Create(nullptr, 1773) && state.good && dialog.DestroyWindow() && state.finalized == 2);
+        OwnerDrawState deleted; deleted.modal = modal; deleted.cancel = true; deleted.deleteOnFinal = true;
+        auto owner = new OwnerDrawDialog(deleted);
+        if (modal) CHECK(owner->DoModal(nullptr, 1773) == 93);
+        else CHECK(!owner->Create(nullptr, 1773));
+        CHECK(deleted.good && deleted.initialized == 1 && deleted.finalized == 1 && deleted.deleted == 1 && !ATL::detail::AxDialogCreation::Current());
+    }
+    return true;
+}
 bool plainDialogs() {
     const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
     FreeDialogState free;
@@ -729,7 +848,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!dialogTemplates() || !plainDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

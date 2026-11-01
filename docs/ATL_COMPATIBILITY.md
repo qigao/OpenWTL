@@ -634,9 +634,9 @@ missing IDs and duplicate matching dialog IDs is invalid.
 
 Only native ListBox/ComboBox class ordinals (0x83/0x85) or their case-insensitive
 class names are admitted for these messages. Class mismatches fail
-ERROR_INVALID_DATA. Owner-drawn controls and LBS_NODATA fail ERROR_NOT_SUPPORTED;
-this path does not provide application drawing/comparison callbacks during
-initialization. Ordinary sorted/case-converting controls use native behavior.
+ERROR_INVALID_DATA. Owner-drawn controls require LBS_HASSTRINGS/CBS_HASSTRINGS. Pointer-valued item
+data and LBS_NODATA remain ERROR_NOT_SUPPORTED. Fixed and variable owner drawing
+receive native measurement/drawing callbacks through the application procedure. Ordinary sorted/case-converting controls use native behavior.
 The initializer sends native LB_ADDSTRING/CB_ADDSTRING through SendMessageA with
 owned, bounded ANSI bytes. Windows translates to the control's character set
 using its native code-page behavior; no alternate encoding library or assumed
@@ -690,9 +690,20 @@ failure. Initialization that destroys a host or dialog is also a failed creation
 Successful initialization hands the native dialog procedure slot to the caller;
 CAxDialogImpl then binds its usual thunk and sink map. There is no dialog-context
 registry or retained pointer into a temporary resource. This path deliberately
-initializes after all native children exist; it does not claim ATL's exact
-WM_CREATE callback sequence or inline creation-data format. Early application
-dialog callbacks before WM_INITDIALOG are not forwarded on this path. Resources
+initializes ActiveX state after all native children exist; it does not claim
+ATL's exact WM_CREATE callback sequence or inline creation-data format. Early
+application callbacks are forwarded through the actual current dialog procedure.
+A scoped, image-local thread pointer associates only the first native callback
+with its creation frame; nested creation restores the previous pointer. A native
+SetWindowSubclass hook then intercepts WM_INITDIALOG before application dispatch.
+It initializes resources once, blocks recursive WM_INITDIALOG during that work,
+and removes itself before application WM_INITDIALOG. Measurement and other
+messages during initialization continue to the application, so a StartDialogProc
+thunk installed by an early callback is preserved. WM_NCDESTROY retires the
+context before forwarding owner cleanup, including self-deleting final callbacks.
+No modeless window keeps a pointer to a returned creation frame. If a remaining
+subclass cannot be removed safely, cleanup terminates instead of returning a
+dangling callback. Scoped cleanup preserves the native last-error result. Resources
 without initialization records retain the existing creation path.
 
 Existing ActiveX cases embed own standard/extended and named dialog resources.
@@ -712,6 +723,9 @@ both modal/modeless paths and cleanup after a later converted control fails.
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
+Native callbacks: [WM_MEASUREITEM](https://learn.microsoft.com/en-us/windows/win32/controls/wm-measureitem),
+[SetWindowSubclass](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-setwindowsubclass),
+[RemoveWindowSubclass](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-removewindowsubclass).
 Native string initialization: [LB_ADDSTRING](https://learn.microsoft.com/en-us/windows/win32/controls/lb-addstring),
 [CB_ADDSTRING](https://learn.microsoft.com/en-us/windows/win32/controls/cb-addstring),
 [automatic message translation](https://learn.microsoft.com/en-us/windows/win32/intl/automatic-message-translation).
@@ -772,7 +786,21 @@ sorting, empty entries, odd byte offsets, process-ACP conversion against native
 MultiByteToWideChar, native uppercase behavior, exact template/resource bytes,
 modal/modeless parameters, owner reuse and self-deleting final callbacks. Invalid
 lengths/terminators/IDs/classes, conflicting kinds and unsupported owner-drawn or
-no-data styles fail before user initialization. The existing lifecycle case mixes
+no-data or owner-drawn styles without HASSTRINGS fail before user initialization. The existing lifecycle case mixes
 these strings with a real registered ActiveX INITNEW control. Existing executable,
 modes, workflow, 25-second budgets and stdout markers are unchanged. Nonempty or
 licensed INITNEW still has no admitted wire format and remains unsupported.
+
+Existing pre-OLE cases add compiled standard/extended fixed/variable owner-drawn
+list/combo resources with HASSTRINGS. They verify native WM_MEASUREITEM before
+application initialization, measured item heights, sorted/copied strings and
+WM_DRAWITEM while painting into an in-memory DIB DC. Painting after modeless
+Create also verifies that application callbacks work after creation-context
+handoff. Measurement creates a nested modal resource dialog; variable measurement
+sends a recursive WM_INITDIALOG which must not initialize twice. Immediate close
+from application WM_INITDIALOG, owner reuse and self-deleting final callbacks
+verify retirement after context handoff. Early measurement only supplies dimensions;
+child contents are queried after native construction. Existing ActiveX load-failure tests count final callbacks
+exactly when an early message attached the C++ owner. Native storage/stream/sink
+regressions remain in their existing modes and 25-second budgets. This software
+painting does not invoke a printer or hardware HSP.

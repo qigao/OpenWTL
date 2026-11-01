@@ -237,10 +237,16 @@ public:
     enum { IDD = 610 };
     WORD resource = IDD;
     ControlState& state;
-    bool modal = false, closeInInit = false, good = true;
+    bool modal = false, closeInInit = false, good = true, attached = false;
     int initialized = 0, finalized = 0;
     int expectedNew = 0, expectedLoads = 1, expectedActivations = 1, expectedStorages = 0;
     explicit ResourceDialog(ControlState& value) : state(value) {}
+    DLGPROC GetDialogProc() override { return Trace; }
+    static INT_PTR CALLBACK Trace(HWND context, UINT message, WPARAM w, LPARAM l) {
+        auto self = static_cast<ResourceDialog*>(reinterpret_cast<ATL::CDialogImplBaseT<ATL::CWindow>*>(context));
+        self->attached = true;
+        return ATL::CAxDialogImpl<ResourceDialog>::DialogProc(context, message, w, l);
+    }
     int GetIDD() const { return resource; }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
         ++initialized;
@@ -330,7 +336,7 @@ bool resourceInitialization() {
         else REQUIRE(!dialog.Create(nullptr, 1773));
         REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0);
         REQUIRE(dialog.initialized == (mode == 5 ? 1 : 0));
-        REQUIRE(dialog.finalized == (mode == 5 ? 1 : 0));
+        REQUIRE(dialog.finalized == (dialog.attached ? 1 : 0));
         REQUIRE(state.destroyed == (mode == 0 ? 0 : mode == 1 ? 2 : 1));
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         dialog.resource = 610; dialog.modal = false; dialog.closeInInit = false;
@@ -351,7 +357,7 @@ bool resourceInitialization() {
         else if (modal) REQUIRE(dialog.DoModal(nullptr, 1773) == -1);
         else REQUIRE(!dialog.Create(nullptr, 1773));
         REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0);
-        REQUIRE(dialog.initialized == (mode == 4 ? 1 : 0) && dialog.finalized == (mode == 4 ? 1 : 0));
+        REQUIRE(dialog.initialized == (mode == 4 ? 1 : 0) && dialog.finalized == (dialog.attached ? 1 : 0));
         REQUIRE(state.initialized == (mode == 3 ? 2 : mode == 5 ? 0 : 1) && state.loaded == 0);
         REQUIRE(state.activated == (mode == 3 || mode == 4 ? 1 : 0));
         REQUIRE(state.destroyed == (mode == 3 ? 2 : 1));
@@ -376,7 +382,7 @@ bool resourceInitialization() {
         else if (modal) REQUIRE(dialog.DoModal(nullptr, 1773) == -1);
         else REQUIRE(!dialog.Create(nullptr, 1773));
         REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0 && !state.initialized && !state.loaded);
-        REQUIRE(dialog.initialized == (mode == 6 ? 1 : 0) && dialog.finalized == (mode == 6 ? 1 : 0));
+        REQUIRE(dialog.initialized == (mode == 6 ? 1 : 0) && dialog.finalized == (dialog.attached ? 1 : 0));
         REQUIRE(state.storageLoaded == (mode == 0 || mode == 1 || mode == 7 || mode == 8 ? 0 : mode == 5 ? 2 : 1));
         REQUIRE(state.storageReleased == state.storageLoaded && state.storageReadOnly);
         REQUIRE(state.activated == (mode == 5 || mode == 6 ? 1 : 0));
