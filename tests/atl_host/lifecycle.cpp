@@ -14,7 +14,7 @@ struct ControlState {
     CLSID classId{};
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
     bool siteOrder = true, licenseSeen = false;
-    bool discoverWindow = false, destroyDialogDuringInit = false;
+    bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     ULONG streamBytes = 4;
     HWND window = nullptr;
     int initialized = 0, loaded = 0, activated = 0, detached = 0, closed = 0, destroyed = 0;
@@ -95,6 +95,7 @@ private:
         state_.siteOrder = state_.siteOrder && (static_cast<bool>(site_.p) == state_.siteFirst);
         if (state_.destroyDuringInit) ::DestroyWindow(state_.window);
         if (state_.destroyDialogDuringInit) ::DestroyWindow(::GetParent(state_.window));
+        if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder ? E_FAIL : S_OK;
     }
     ~Control() { ++state_.destroyed; }
@@ -212,9 +213,10 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
-    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619)}) for (int mode = 0; mode < 4; ++mode) {
+    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
+        state.sendInitDuringLoad = mode == 4;
         state.streamBytes = resource == 619 ? 5 : 4;
         ResourceDialog dialog(state); dialog.resource = resource; dialog.modal = mode == 3;
         if (dialog.modal) REQUIRE(dialog.DoModal(nullptr, 1773) == 93);

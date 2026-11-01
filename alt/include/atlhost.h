@@ -505,6 +505,7 @@ struct AxDialogCreation {
     LPARAM parameter;
     bool modal;
     DWORD error = ERROR_SUCCESS;
+    static INT_PTR CALLBACK InitializingProc(HWND, UINT, WPARAM, LPARAM) noexcept { return FALSE; }
     HRESULT Initialize(HWND dialog) noexcept {
         for (const auto& record : prepared.initialization) {
             const HWND child = ::GetDlgItem(dialog, record.id);
@@ -539,7 +540,12 @@ struct AxDialogCreation {
         // native dialog manager creates all ordinary children first.
         if (message != WM_INITDIALOG) return FALSE;
         auto& creation = *reinterpret_cast<AxDialogCreation*>(l);
-        HRESULT hr = creation.Initialize(window);
+        // A control may synchronously send another WM_INITDIALOG while loading.
+        // It must not reinterpret that message's lParam as our creation context.
+        ::SetLastError(ERROR_SUCCESS);
+        const LONG_PTR previousProcedure = ::SetWindowLongPtrW(window, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(InitializingProc));
+        HRESULT hr = !previousProcedure && ::GetLastError() ? HRESULT_FROM_WIN32(::GetLastError()) : S_OK;
+        if (SUCCEEDED(hr)) hr = creation.Initialize(window);
         if (SUCCEEDED(hr)) {
             ::SetLastError(ERROR_SUCCESS);
             const LONG_PTR previous = ::SetWindowLongPtrW(window, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(creation.procedure));
