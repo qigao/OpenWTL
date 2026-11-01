@@ -151,6 +151,225 @@ bool ComMapChain() {
     }
     return true;
 }
+inline constexpr CLSID aggregateClassId = {0xf9cb25d5, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+inline constexpr CLSID onlyAggregateClassId = {0xf9cb25d6, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+inline constexpr CLSID noAggregateClassId = {0xf9cb25d7, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+int aggregateLive = 0, aggregateReleased = 0, aggregateFailure = 0;
+OpenATL::COM::Module* aggregateModule = nullptr;
+bool aggregatePinned = true;
+
+class AggregateValue : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                       public ATL::CComCoClass<AggregateValue, &aggregateClassId>,
+                       public IPersist {
+public:
+    DECLARE_AGGREGATABLE(AggregateValue)
+    DECLARE_GET_CONTROLLING_UNKNOWN()
+    BEGIN_COM_MAP(AggregateValue)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+    AggregateValue() {
+        if (aggregateFailure == 4) throw std::bad_alloc();
+        ++aggregateLive;
+    }
+    ~AggregateValue() {
+        if (aggregateModule && aggregateModule->CanUnloadNow() != S_FALSE)
+            aggregatePinned = false;
+        --aggregateLive;
+    }
+    HRESULT FinalConstruct() {
+        // Interface QI must temporarily retain the controlling outer, while
+        // the nondelegating inner reference count stays independent.
+        ATL::CComPtr<IPersist> temporary;
+        HRESULT hr = _InternalQueryInterface(IID_IPersist,
+            reinterpret_cast<void**>(&temporary.p));
+        if (FAILED(hr)) return hr;
+        if (aggregateFailure == 1) return E_ACCESSDENIED;
+        if (aggregateFailure == 2) throw ATL::CAtlException(E_ABORT);
+        if (aggregateFailure == 3) throw std::runtime_error("aggregate FinalConstruct");
+        return S_OK;
+    }
+    void FinalRelease() noexcept { ++aggregateReleased; }
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = aggregateClassId;
+        return S_OK;
+    }
+};
+class OnlyAggregateValue : public AggregateValue {
+public:
+    DECLARE_ONLY_AGGREGATABLE(OnlyAggregateValue)
+};
+class NoAggregateValue : public AggregateValue {
+public:
+    DECLARE_NOT_AGGREGATABLE(NoAggregateValue)
+};
+
+// A stack owner intentionally never deletes itself; refcount equality after
+// every operation exposes leaks/double AddRef without test-owned lifetimes
+// hiding a broken controlling identity. It owns only the inner IUnknown.
+class AggregateOuter : public IUnknown {
+public:
+    std::atomic<ULONG> refs{1};
+    ATL::CComPtr<IUnknown> inner;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown)) {
+            *output = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return inner ? inner->QueryInterface(iid, output) : E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return --refs; }
+};
+
+// Both specific and blind aggregate map entries return an already-owned
+// interface from inner QI. Chained maps must propagate that ownership too.
+class AggregateMap : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                     public IClassFactory {
+public:
+    ATL::CComPtr<IUnknown> inner;
+    BEGIN_COM_MAP(AggregateMap)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AGGREGATE(IID_IPersist, inner)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown*, REFIID, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr; return CLASS_E_CLASSNOTAVAILABLE;
+    }
+    HRESULT STDMETHODCALLTYPE LockServer(BOOL) override { return E_NOTIMPL; }
+};
+class AggregateBlindMap : public AggregateMap {
+public:
+    BEGIN_COM_MAP(AggregateBlindMap)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AGGREGATE_BLIND(inner)
+    END_COM_MAP()
+};
+class AggregateChainedMap : public AggregateMap {
+public:
+    BEGIN_COM_MAP(AggregateChainedMap)
+        COM_INTERFACE_ENTRY_CHAIN(AggregateMap)
+    END_COM_MAP()
+};
+
+template<class Outer>
+bool AggregateMapIdentity() {
+    ATL::CComObject<Outer>* object = nullptr;
+    CHECK(ATL::CComObject<Outer>::CreateInstance(&object) == S_OK && object);
+    CHECK(object->AddRef() == 1);
+    void* missing = reinterpret_cast<void*>(1);
+    CHECK(object->QueryInterface(IID_IPersist, &missing) == E_NOINTERFACE && !missing);
+    CHECK(AggregateValue::CreateInstance(object->GetControllingUnknown(), IID_IUnknown,
+        reinterpret_cast<void**>(&object->inner.p)) == S_OK);
+    ATL::CComPtr<IPersist> value;
+    CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK);
+    ATL::CComPtr<IUnknown> identity;
+    CHECK(value->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK &&
+          identity.p == object->GetUnknown());
+    CLSID id{};
+    CHECK(value->GetClassID(&id) == S_OK && IsEqualCLSID(id, aggregateClassId));
+    CHECK(object->QueryInterface(IID_IStream, &missing) == E_NOINTERFACE && !missing);
+    identity.Release();
+    value.Release();
+    CHECK(object->Release() == 0 && aggregateLive == 0); // No double QI AddRef/cycle.
+    return true;
+}
+
+bool Aggregation() {
+    AggregateOuter outer;
+    using Raw = ATL::CComAggObject<AggregateValue>;
+    Raw* raw = reinterpret_cast<Raw*>(1);
+    CHECK(Raw::CreateInstance(nullptr, &raw) == E_INVALIDARG && !raw);
+    CHECK(Raw::CreateInstance(&outer, nullptr) == E_POINTER);
+    CHECK(Raw::CreateInstance(&outer, &raw) == S_OK && raw && outer.refs == 1);
+    CHECK(raw->AddRef() == 1 && raw->m_contained.GetControllingUnknown() == &outer);
+    ATL::CComPtr<IPersist> value;
+    CHECK(raw->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK && outer.refs == 2);
+    ATL::CComPtr<IUnknown> identity;
+    CHECK(value->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK &&
+          identity.p == &outer && outer.refs == 3);
+    ATL::CComPtr<IUnknown> innerIdentity;
+    CHECK(raw->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&innerIdentity.p)) == S_OK &&
+          innerIdentity.p == static_cast<IUnknown*>(raw) && innerIdentity.p != identity.p && outer.refs == 3);
+    innerIdentity.Release(); identity.Release(); value.Release();
+    CHECK(outer.refs == 1 && raw->Release() == 0 && aggregateLive == 0);
+
+    const OpenATL::COM::ClassEntry entries[] = {
+        {aggregateClassId, nullptr, &ATL::detail::AutoClassCreator<AggregateValue>::CreateInstance},
+        {onlyAggregateClassId, nullptr, &ATL::detail::AutoClassCreator<OnlyAggregateValue>::CreateInstance},
+        {noAggregateClassId, nullptr, &ATL::detail::AutoClassCreator<NoAggregateValue>::CreateInstance}
+    };
+    const OpenATL::COM::ClassEntry invalid[] = {
+        {aggregateClassId, nullptr, nullptr},
+        {aggregateClassId, &ATL::CComObject<AggregateValue>::CreateInstance,
+             &ATL::detail::AutoClassCreator<AggregateValue>::CreateInstance}
+    };
+    for (const auto& entry : invalid) {
+        OpenATL::COM::Module rejected(&entry, 1);
+        CHECK(rejected.Status() == E_INVALIDARG);
+    }
+    OpenATL::COM::Module module(entries, 3);
+    CHECK(module.Status() == S_OK);
+    aggregateModule = &module;
+    for (const auto& entry : entries) {
+        ATL::CComPtr<IClassFactory> factory;
+        CHECK(module.GetClassObject(entry.clsid, IID_IClassFactory,
+            reinterpret_cast<void**>(&factory.p)) == S_OK);
+        void* output = reinterpret_cast<void*>(1);
+        CHECK(factory->CreateInstance(&outer, IID_IPersist, &output) == CLASS_E_NOAGGREGATION &&
+              !output && outer.refs == 1 && aggregateLive == 0);
+        CHECK(factory->CreateInstance(&outer, IID_IUnknown, nullptr) == E_POINTER);
+        if (IsEqualCLSID(entry.clsid, noAggregateClassId)) {
+            CHECK(factory->CreateInstance(&outer, IID_IUnknown, &output) == CLASS_E_NOAGGREGATION && !output);
+        } else {
+            CHECK(factory->CreateInstance(&outer, IID_IUnknown,
+                reinterpret_cast<void**>(&outer.inner.p)) == S_OK && outer.refs == 1 && aggregateLive == 1);
+            CHECK(outer.QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK && outer.refs == 2);
+            CHECK(value->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK &&
+                  identity.p == &outer && outer.refs == 3);
+            identity.Release(); value.Release();
+            CHECK(outer.refs == 1);
+            outer.inner.Release();
+        }
+        HRESULT expected = IsEqualCLSID(entry.clsid, onlyAggregateClassId) ? E_FAIL : S_OK;
+        CHECK(factory->CreateInstance(nullptr, IID_IPersist,
+              reinterpret_cast<void**>(&value.p)) == expected);
+        value.Release(); factory.Release();
+        CHECK(module.CanUnloadNow() == S_OK && aggregateLive == 0 && outer.refs == 1);
+    }
+    const HRESULT errors[] = {S_OK, E_ACCESSDENIED, E_ABORT, E_UNEXPECTED, E_OUTOFMEMORY};
+    for (aggregateFailure = 1; aggregateFailure <= 4; ++aggregateFailure) {
+        const int releasedBefore = aggregateReleased;
+        void* output = reinterpret_cast<void*>(1);
+        CHECK(ATL::detail::AutoClassCreator<AggregateValue>::CreateInstance(
+            module, &outer, IID_IUnknown, &output) == errors[aggregateFailure] && !output);
+        CHECK(aggregateReleased == releasedBefore + (aggregateFailure == 4 ? 0 : 1));
+        CHECK(aggregateLive == 0 && outer.refs == 1 && module.CanUnloadNow() == S_OK);
+    }
+    aggregateFailure = 0;
+    // An object must pin the engine even after its factory has retired.
+    ATL::CComPtr<IClassFactory> factory;
+    CHECK(module.GetClassObject(aggregateClassId, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK);
+    CHECK(factory->CreateInstance(&outer, IID_IUnknown,
+        reinterpret_cast<void**>(&outer.inner.p)) == S_OK);
+    factory.Release();
+    CHECK(module.CanUnloadNow() == S_FALSE);
+    outer.inner.Release();
+    CHECK(module.CanUnloadNow() == S_OK && aggregatePinned && aggregateLive == 0 && outer.refs == 1);
+    aggregateModule = nullptr;
+    CHECK(AggregateMapIdentity<AggregateMap>());
+    CHECK(AggregateMapIdentity<AggregateBlindMap>());
+    CHECK(AggregateMapIdentity<AggregateChainedMap>());
+    return true;
+}
+
 class Single : public ATL::CComObjectRootEx<ATL::CComSingleThreadModel>, public IPersist {
 public:
     BEGIN_COM_MAP(Single)
@@ -165,6 +384,7 @@ public:
 
 bool RunAtlCompatibilityTests() {
     CHECK(ComMapChain());
+    CHECK(Aggregation());
     using Object = ATL::CComObject<Compatible>;
     CHECK(Object::CreateInstance(static_cast<Object**>(nullptr)) == E_POINTER);
     Object* object = nullptr;
@@ -212,6 +432,16 @@ bool RunAtlCompatibilityTests() {
     ATL::CComObject<Single>* single = nullptr;
     CHECK(ATL::CComObject<Single>::CreateInstance(&single) == S_OK);
     CHECK(single->AddRef() == 1 && single->Release() == 0);
+    {
+        AggregateOuter outer;
+        ATL::CComAggObject<Single>* aggregate = nullptr;
+        CHECK(ATL::CComAggObject<Single>::CreateInstance(&outer, &aggregate) == S_OK);
+        CHECK(aggregate->AddRef() == 1);
+        ATL::CComPtr<IPersist> singleInterface;
+        CHECK(aggregate->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&singleInterface.p)) == S_OK && outer.refs == 2);
+        singleInterface.Release();
+        CHECK(outer.refs == 1 && aggregate->Release() == 0);
+    }
 
     const OpenATL::COM::ClassEntry entries[] = {{classId, &Object::CreateInstance}};
     OpenATL::COM::Module module(entries, 1);

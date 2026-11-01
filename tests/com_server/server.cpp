@@ -367,6 +367,72 @@ public:
     ~Dll() { Close(); }
 };
 
+// Valid controlling outer in the client image; the DLL owns only the separate
+// nondelegating inner IUnknown. No AddRef of the outer is allowed just because
+// the inner was allocated or queried for its own IUnknown.
+class DllAggregateOuter final : public IUnknown {
+public:
+    std::atomic<ULONG> refs{1};
+    ATL::CComPtr<IUnknown> inner;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown)) {
+            *output = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return inner ? inner->QueryInterface(iid, output) : E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return --refs; }
+};
+bool aggregateDll(Dll& dll, bool nativeCom) {
+    DllAggregateOuter outer;
+    ATL::CComPtr<IClassFactory> factory;
+    REQUIRE(dll.get(CLSID_OpenATLValue, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK && factory.p);
+    void* invalid = reinterpret_cast<void*>(1);
+    REQUIRE(factory->CreateInstance(&outer, IID_OpenATLValue, &invalid) ==
+        CLASS_E_NOAGGREGATION && !invalid && outer.refs == 1);
+    REQUIRE(factory->CreateInstance(&outer, IID_IUnknown, nullptr) == E_POINTER);
+    HRESULT hr = nativeCom
+        ? ::CoCreateInstance(CLSID_OpenATLValue, &outer, CLSCTX_INPROC_SERVER,
+                             IID_IUnknown, reinterpret_cast<void**>(&outer.inner.p))
+        : factory->CreateInstance(&outer, IID_IUnknown,
+                                   reinterpret_cast<void**>(&outer.inner.p));
+    REQUIRE(hr == S_OK && outer.inner.p && outer.refs == 1);
+    factory.Release();
+    REQUIRE(dll.unload() == S_FALSE);
+    ATL::CComPtr<IUnknown> privateIdentity;
+    REQUIRE(outer.inner->QueryInterface(IID_IUnknown,
+        reinterpret_cast<void**>(&privateIdentity.p)) == S_OK &&
+        privateIdentity.p == outer.inner.p && privateIdentity.p != &outer && outer.refs == 1);
+    privateIdentity.Release();
+    ATL::CComPtr<IOpenATLValue> value;
+    REQUIRE(outer.QueryInterface(IID_OpenATLValue, reinterpret_cast<void**>(&value.p)) == S_OK && outer.refs == 2);
+    LONG result = 0;
+    REQUIRE(value->GetValue(&result) == S_OK && result == 42);
+    ATL::CComPtr<IOpenATLSecond> second;
+    REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && outer.refs == 3);
+    REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
+    ATL::CComPtr<IUnknown> canonical;
+    REQUIRE(second->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK &&
+        canonical.p == &outer && outer.refs == 4);
+    canonical.Release(); second.Release(); value.Release();
+    REQUIRE(outer.refs == 1);
+    outer.inner.Release();
+    // Exercise explicit DECLARE_NOT_AGGREGATABLE through the same auto-map
+    // engine, not just its direct local helper.
+    REQUIRE(dll.get(CLSID_OpenATLAuxValue, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK);
+    REQUIRE(factory->CreateInstance(&outer, IID_IUnknown, &invalid) == CLASS_E_NOAGGREGATION && !invalid);
+    factory.Release();
+    if (nativeCom) ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_OK && outer.refs == 1);
+    return true;
+}
+
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
 bool embeddedDispatch(Dll& dll, const char* creator = "OpenATLCreateEmbeddedDispatch") {
     using Create = HRESULT (WINAPI*)(IDispatch**);
@@ -1431,6 +1497,8 @@ bool native(DWORD apartment) {
     ULONG_PTR token = 0;
     REQUIRE(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     REQUIRE(dll.unload() == S_OK);
+    REQUIRE(aggregateDll(dll, false));
+    REQUIRE(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     // Direct factory use is independent of COM initialization.
     ATL::CComPtr<IClassFactory> factory;
     REQUIRE(dll.get(CLSID_OpenATLValue, IID_IClassFactory,
@@ -1467,6 +1535,7 @@ bool native(DWORD apartment) {
     HRESULT initialized = ::CoInitializeEx(nullptr, apartment);
     REQUIRE(initialized == S_OK);
     struct ApartmentOwner { ~ApartmentOwner() { ::CoUninitialize(); } } owner;
+    REQUIRE(aggregateDll(dll, true));
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
     REQUIRE(embeddedDispatch(dll));
     REQUIRE(embeddedDispatch(dll, "OpenATLCreateRegisteredDispatch"));

@@ -1,4 +1,4 @@
-// OpenATL - clean-room nonaggregated ATL object and COM-map compatibility.
+// OpenATL - clean-room ATL objects, aggregation and COM-map compatibility.
 #ifndef __ATLCOM_H__
 #define __ATLCOM_H__
 #pragma once
@@ -55,6 +55,19 @@ public:
         if (count == (std::numeric_limits<ULONG>::max)()) std::terminate();
         return count;
     }
+    HRESULT OuterQueryInterface(REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        return m_pOuterUnknown ? m_pOuterUnknown->QueryInterface(iid, output) : E_UNEXPECTED;
+    }
+    ULONG OuterAddRef() noexcept {
+        if (!m_pOuterUnknown) std::terminate();
+        return m_pOuterUnknown->AddRef();
+    }
+    ULONG OuterRelease() noexcept {
+        if (!m_pOuterUnknown) std::terminate();
+        return m_pOuterUnknown->Release();
+    }
     void InternalFinalConstructAddRef() noexcept { InternalAddRef(); }
     void InternalFinalConstructRelease() noexcept { InternalRelease(); }
     void Lock() noexcept { m_criticalSection.Lock(); }
@@ -65,6 +78,7 @@ protected:
     CComObjectRootEx() noexcept = default;
     ~CComObjectRootEx() = default;
     LONG m_dwRef = 0;
+    IUnknown* m_pOuterUnknown = nullptr; // Borrowed controlling identity; never AddRef here.
 private:
     typename ThreadModel::AutoCriticalSection m_criticalSection;
 };
@@ -116,6 +130,7 @@ public:
         if (!count) delete this;
         return count;
     }
+    virtual IUnknown* GetControllingUnknown() noexcept { return this->GetUnknown(); }
     // ATL's local creator returns a raw object with reference count ZERO.
     static HRESULT WINAPI CreateInstance(CComObject** output) noexcept {
         return CreateObject(nullptr, output);
@@ -155,6 +170,92 @@ private:
     }
 };
 
+// The contained interfaces delegate identity/refcounts to the outer object.
+// The separate CComAggObject IUnknown owns the inner allocation independently.
+template<class Base>
+class CComContainedObject : public Base {
+public:
+    explicit CComContainedObject(void* outer) noexcept(std::is_nothrow_default_constructible<Base>::value) {
+        this->m_pOuterUnknown = static_cast<IUnknown*>(outer);
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        return this->OuterQueryInterface(iid, output);
+    }
+    template<class Q> HRESULT QueryInterface(Q** output) noexcept {
+        return QueryInterface(__uuidof(Q), reinterpret_cast<void**>(output));
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return this->OuterAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return this->OuterRelease(); }
+    virtual IUnknown* GetControllingUnknown() noexcept { return this->m_pOuterUnknown; }
+};
+
+template<class Base>
+class CComAggObject : private detail::AtlObjectModulePin, public IUnknown,
+    public CComObjectRootEx<typename Base::_ThreadModel::ThreadModelNoCS> {
+public:
+    explicit CComAggObject(void* outer) : m_contained(outer) {}
+    ~CComAggObject() { FinalRelease(); }
+    CComContainedObject<Base> m_contained;
+    HRESULT FinalConstruct() { return m_contained.FinalConstruct(); }
+    void FinalRelease() noexcept { m_contained.FinalRelease(); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown)) {
+            *output = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return m_contained._InternalQueryInterface(iid, output);
+    }
+    template<class Q> HRESULT QueryInterface(Q** output) noexcept {
+        return QueryInterface(__uuidof(Q), reinterpret_cast<void**>(output));
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return this->InternalAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override {
+        ULONG count = this->InternalRelease();
+        if (!count) delete this;
+        return count;
+    }
+    static HRESULT WINAPI CreateInstance(IUnknown* outer, CComAggObject** output) noexcept {
+        return CreateObject(nullptr, outer, output);
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!outer) return E_INVALIDARG;
+        if (!IsEqualIID(iid, IID_IUnknown)) return CLASS_E_NOAGGREGATION;
+        CComAggObject* object = nullptr;
+        HRESULT hr = CreateObject(&module, outer, &object);
+        if (FAILED(hr)) return hr;
+        object->AddRef();
+        hr = object->QueryInterface(iid, output);
+        object->Release();
+        return hr;
+    }
+private:
+    static HRESULT CreateObject(OpenATL::COM::Module* module, IUnknown* outer,
+                                CComAggObject** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!outer) return E_INVALIDARG;
+        CComAggObject* object = nullptr;
+        try { object = new CComAggObject(outer); }
+        catch (...) { return detail::AtlObjectException(); }
+        HRESULT hr = module ? object->BindModule(*module) : S_OK;
+        if (SUCCEEDED(hr)) {
+            object->InternalFinalConstructAddRef();
+            try { hr = object->FinalConstruct(); }
+            catch (...) { hr = detail::AtlObjectException(); }
+            object->InternalFinalConstructRelease();
+        }
+        if (FAILED(hr)) { delete object; return hr; }
+        *output = object; // Native ATL raw creator returns ZERO references.
+        return S_OK;
+    }
+};
+
 template<class ObjectType>
 class CComCreator {
 public:
@@ -170,20 +271,106 @@ public:
         object->Release();
         return hr;
     }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (outer) return CLASS_E_NOAGGREGATION;
+        return ObjectType::CreateInstance(module, iid, output);
+    }
+};
+
+template<class Base>
+class CComCreator<CComAggObject<Base>> {
+public:
+    static HRESULT WINAPI CreateInstance(void* outer, REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!outer) return E_INVALIDARG;
+        if (!IsEqualIID(iid, IID_IUnknown)) return CLASS_E_NOAGGREGATION;
+        CComAggObject<Base>* object = nullptr;
+        HRESULT hr = CComAggObject<Base>::CreateInstance(static_cast<IUnknown*>(outer), &object);
+        if (FAILED(hr)) return hr;
+        object->AddRef();
+        hr = object->QueryInterface(iid, output);
+        object->Release();
+        return hr;
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        return CComAggObject<Base>::CreateInstance(module, outer, iid, output);
+    }
+};
+
+template<HRESULT Failure>
+class CComFailCreator {
+public:
+    static HRESULT WINAPI CreateInstance(void*, REFIID, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        return Failure;
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module&, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        return CreateInstance(outer, iid, output);
+    }
+};
+
+template<class NonAggregated, class Aggregated>
+class CComCreator2 {
+public:
+    static HRESULT WINAPI CreateInstance(void* outer, REFIID iid, void** output) noexcept {
+        return outer ? Aggregated::CreateInstance(outer, iid, output)
+                     : NonAggregated::CreateInstance(outer, iid, output);
+    }
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        return outer ? Aggregated::CreateInstance(module, outer, iid, output)
+                     : NonAggregated::CreateInstance(module, outer, iid, output);
+    }
 };
 
 template<class T, const CLSID* ClassId = &CLSID_NULL>
 class CComCoClass {
 public:
+    using _CreatorClass = CComCreator2<CComCreator<CComObject<T>>, CComCreator<CComAggObject<T>>>;
     static const CLSID& WINAPI GetObjectCLSID() noexcept { return *ClassId; }
     static HRESULT WINAPI CreateInstance(IUnknown* outer, REFIID iid, void** output) noexcept {
-        return CComCreator<CComObject<T>>::CreateInstance(outer, iid, output);
+        using CreatorClass = typename T::_CreatorClass;
+        return CreatorClass::CreateInstance(outer, iid, output);
     }
     template<class Q>
     static HRESULT WINAPI CreateInstance(Q** output) noexcept {
         return CreateInstance(nullptr, __uuidof(Q), reinterpret_cast<void**>(output));
     }
 };
+namespace detail {
+template<class T, class = void> struct AutoClassPolicy {
+    using Type = CComCreator<CComObject<T>>;
+};
+template<class T> struct AutoClassPolicy<T, std::void_t<typename T::_CreatorClass>> {
+    using Type = typename T::_CreatorClass;
+};
+template<class T> struct AutoClassCreator {
+    static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
+                                  REFIID iid, void** output) noexcept {
+        using Policy = typename AutoClassPolicy<T>::Type;
+        return Policy::CreateInstance(module, outer, iid, output);
+    }
+};
+inline HRESULT QueryAggregate(IUnknown* inner, REFIID iid, void** output,
+                               bool& owned) noexcept {
+    *output = nullptr;
+    if (!inner) return E_NOINTERFACE;
+    HRESULT hr = inner->QueryInterface(iid, output);
+    if (hr != S_OK || !*output) {
+        *output = nullptr;
+        return SUCCEEDED(hr) ? E_UNEXPECTED : hr;
+    }
+    owned = true;
+    return S_OK;
+}
+} // namespace detail
 } // namespace ATL
 
 // Maps use real typed casts, including pointer adjustment for multiple
@@ -192,16 +379,19 @@ public:
 public: \
     using _ComMapClass = x; \
     HRESULT _InternalQueryInterface(REFIID iid, void** output) noexcept { \
-        HRESULT hr = _OpenATLFindInterface(iid, output); \
-        if (SUCCEEDED(hr)) this->InternalAddRef(); \
+        bool owned = false; \
+        HRESULT hr = _OpenATLFindInterface(iid, output, owned); \
+        if (hr == S_OK && !owned) static_cast<IUnknown*>(*output)->AddRef(); \
         return hr; \
     } \
     IUnknown* GetUnknown() noexcept { \
         void* output = nullptr; \
-        _OpenATLFindInterface(IID_IUnknown, &output); \
+        bool owned = false; \
+        _OpenATLFindInterface(IID_IUnknown, &output, owned); \
         return static_cast<IUnknown*>(output); \
     } \
-    HRESULT _OpenATLFindInterface(REFIID iid, void** output) noexcept { \
+    HRESULT _OpenATLFindInterface(REFIID iid, void** output, bool& owned) noexcept { \
+        owned = false; \
         if (!output) return E_POINTER; \
         *output = nullptr; \
         bool _atlFirst = true;
@@ -223,16 +413,16 @@ public: \
           return S_OK; \
       } _atlFirst = false; }
 #define COM_INTERFACE_ENTRY2(x, via) COM_INTERFACE_ENTRY2_IID(__uuidof(x), x, via)
-// Chain to an existing ATL base COM map without invoking QueryInterface:
-// the outermost CComObject::QueryInterface adds the one owning reference.
-// A chained map only supplies a borrowed, correctly adjusted interface ptr.
+// Chain a base map without adding a second reference. Simple entries return
+// borrowed adjusted pointers; aggregate entries already own their QI result.
+// Propagate that ownership through a chain to the final public QI boundary.
 // In particular, the outer map's first simple entry still defines the
 // canonical IUnknown; a chain-only outer map inherits its base identity.
 #define COM_INTERFACE_ENTRY_CHAIN(base) \
     { \
         void* _atlChained = nullptr; \
         const HRESULT _atlChainHr = \
-            static_cast<base*>(this)->_OpenATLFindInterface(iid, &_atlChained); \
+            static_cast<base*>(this)->_OpenATLFindInterface(iid, &_atlChained, owned); \
         if (_atlChainHr == S_OK && _atlChained) { \
             *output = _atlChained; \
             return S_OK; \
@@ -240,12 +430,23 @@ public: \
         if (SUCCEEDED(_atlChainHr)) return E_UNEXPECTED; \
         if (_atlChainHr != E_NOINTERFACE) return _atlChainHr; \
     }
+// Inner QI already returns an owned interface; never AddRef it a second time.
+// IUnknown always comes from a simple/chained entry of the outer map.
+#define COM_INTERFACE_ENTRY_AGGREGATE(id, member) \
+    if (!IsEqualIID(iid, IID_IUnknown) && IsEqualIID(iid, id)) \
+        return ::ATL::detail::QueryAggregate(this->member, iid, output, owned);
+#define COM_INTERFACE_ENTRY_AGGREGATE_BLIND(member) \
+    if (!IsEqualIID(iid, IID_IUnknown)) { \
+        const HRESULT _atlAggregateHr = \
+            ::ATL::detail::QueryAggregate(this->member, iid, output, owned); \
+        if (_atlAggregateHr != E_NOINTERFACE) return _atlAggregateHr; \
+    }
 #define END_COM_MAP() \
         (void)_atlFirst; \
         return E_NOINTERFACE; \
     }
-// Standard ATL-style automatic COM object-map declaration. The referenced
-// CComObject<T> creator binds the existing single OpenATL::COM::Module,
+// Standard ATL-style automatic COM object-map declaration. The class-declared
+// creator policy binds the existing single OpenATL::COM::Module,
 // preserving object/factory/server-lock ownership. The registration record
 // is static binary-owned metadata; no COM call or heap allocation occurs
 // in its constructor under the Windows loader lock.
@@ -254,9 +455,8 @@ public: \
 #define OBJECT_ENTRY_AUTO(clsid, type) \
     namespace { \
         ATL::detail::AutoObjectEntry _OPENATL_AUTO_CAT(_openatlAutoEntry_, __COUNTER__)( \
-            (clsid), static_cast<OpenATL::COM::Creator>( \
-                &ATL::CComObject<type>::CreateInstance), \
-            ATL::detail::AutoRegistryMethod<type>::callback); \
+            (clsid), nullptr, ATL::detail::AutoRegistryMethod<type>::callback, \
+            &ATL::detail::AutoClassCreator<type>::CreateInstance); \
     }
 
 // Standard module registration supplies a lazy image/root context; explicit
@@ -304,6 +504,14 @@ public: \
 public: \
     static HRESULT WINAPI UpdateRegistry(BOOL) noexcept { return S_OK; }
 
+#define DECLARE_AGGREGATABLE(x) \
+    using _CreatorClass = ATL::CComCreator2<ATL::CComCreator<ATL::CComObject<x>>, \
+                                          ATL::CComCreator<ATL::CComAggObject<x>>>;
+#define DECLARE_ONLY_AGGREGATABLE(x) \
+    using _CreatorClass = ATL::CComCreator2<ATL::CComFailCreator<E_FAIL>, \
+                                          ATL::CComCreator<ATL::CComAggObject<x>>>;
+#define DECLARE_GET_CONTROLLING_UNKNOWN() \
+    virtual IUnknown* GetControllingUnknown() noexcept = 0;
 #define DECLARE_NOT_AGGREGATABLE(x) \
     using _CreatorClass = ATL::CComCreator<ATL::CComObject<x>>;
 #define DECLARE_PROTECT_FINAL_CONSTRUCT() \

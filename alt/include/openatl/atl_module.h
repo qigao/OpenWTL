@@ -552,12 +552,14 @@ inline std::atomic<AutoObjectEntry*> autoObjectEntries{nullptr};
 struct AutoObjectEntry {
     const CLSID clsid;
     const OpenATL::COM::Creator creator;
+    const OpenATL::COM::AggregatedCreator creatorWithOuter;
     const AutoRegistryCallback registrar;
     AutoObjectEntry* next = nullptr;
 
     AutoObjectEntry(REFCLSID id, OpenATL::COM::Creator function,
-                    AutoRegistryCallback registry = nullptr) noexcept
-        : clsid(id), creator(function), registrar(registry) {
+                    AutoRegistryCallback registry = nullptr,
+                    OpenATL::COM::AggregatedCreator aggregate = nullptr) noexcept
+        : clsid(id), creator(function), creatorWithOuter(aggregate), registrar(registry) {
         AutoObjectEntry* head = autoObjectEntries.load(std::memory_order_relaxed);
         do {
             next = head;
@@ -638,7 +640,8 @@ public:
                     for (const detail::AutoObjectEntry* entry =
                              detail::autoObjectEntries.load(std::memory_order_acquire);
                          entry; entry = entry->next) {
-                        if (IsEqualCLSID(entry->clsid, CLSID_NULL) || !entry->creator) {
+                        if (IsEqualCLSID(entry->clsid, CLSID_NULL) ||
+                            (bool(entry->creator) == bool(entry->creatorWithOuter))) {
                             autoStatus_ = E_INVALIDARG;
                             return;
                         }
@@ -663,7 +666,8 @@ public:
                             return BeforeClsid(a->clsid, b->clsid);
                         });
                     for (const auto* entry : entries) {
-                        autoEntries_.push_back({entry->clsid, entry->creator});
+                        autoEntries_.push_back({entry->clsid, entry->creator,
+                                                entry->creatorWithOuter});
                         autoRegistrars_.push_back({entry->clsid, entry->registrar});
                     }
                     autoOwned_.reset(new (std::nothrow)

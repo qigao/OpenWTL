@@ -515,3 +515,44 @@ References:
 - https://learn.microsoft.com/en-us/windows/win32/api/unknwnbase/nn-unknwnbase-iclassfactory
 - https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-dllcanunloadnow
 - https://learn.microsoft.com/en-us/windows/win32/com/in-process-server-threading-issues
+
+## Basic ATL aggregation and creator policies
+
+CComCoClass selects the standard default aggregatable policy. The class may
+select DECLARE_AGGREGATABLE, DECLARE_NOT_AGGREGATABLE or
+DECLARE_ONLY_AGGREGATABLE. OBJECT_ENTRY_AUTO honors these built-in policies;
+it no longer hardwires every class to CComObject. An aggregate factory request
+must ask for IID_IUnknown; invalid requests fail before allocation or touching
+the outer. Aggregate-only nonaggregated creation returns E_FAIL.
+
+CComAggObject owns a separate nondelegating IUnknown and contains a
+CComContainedObject whose public interface QI/AddRef/Release delegate to the
+borrowed controlling outer. Raw CreateInstance(outer, &raw) returns zero
+references, matching CComObject. Acquire a raw reference immediately. The outer
+owns the nondelegating inner IUnknown and must release it during destruction;
+the inner must not retain the controlling outer just for existing.
+
+COM_INTERFACE_ENTRY_AGGREGATE and its BLIND form query an explicitly supplied
+inner. Simple entries return borrowed pointers internally, while delegated QI
+returns an owned result. That distinction propagates through chained maps so
+public QI owns exactly one reference and every exposed interface returns the
+same controlling IUnknown. A simple/chained entry supplies outer IUnknown;
+aggregate entries never replace it.
+
+The explicit ClassEntry {CLSID, Creator} form keeps its existing nonaggregated
+callback. An optional third createWithOuter callback accepts the controlling
+IUnknown and uses the same Module/ClassFactory engine. Exactly one callback
+must be present. Both object wrappers bind the engine before FinalConstruct
+and retain it through FinalRelease and the contained destructor.
+
+Existing --core tests cover creator policies, raw zero refs, pointer errors,
+independent inner/outer counts, specific/blind/chained aggregate maps, failure
+HRESULTs/exceptions and module pins. The existing real DLL --sta/--mta tests
+exercise direct factory creation without COM initialization and native
+CoCreateInstance aggregation after installation, then verify real methods,
+canonical identity, reference retirement, DllCanUnloadNow and unload.
+
+This milestone does not implement automatic aggregates, CComPolyObject,
+cached/uncached tear-offs, arbitrary custom factory policies or the whole
+original COMMap application. It introduces no second factory provider or test
+entry point, and no printer/hardware-HSP CI requirement.

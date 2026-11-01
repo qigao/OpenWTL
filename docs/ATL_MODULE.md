@@ -504,3 +504,19 @@ full arbitrary RGS registration grammar, complete legacy TypeLib APIs,
 aggregated classes and complete EXE/service COM Server behavior remain
 separate compatibility milestones. Bounded real `REGISTRY` resource-ID
 handling is now available only under an explicit scoped registration policy. Complete Microsoft ATL source compatibility is not yet claimed.
+
+## Automatic factory aggregation policy
+
+OBJECT_ENTRY_AUTO now supplies the built-in class creator policy to the same
+Module engine, including an explicit controlling-outer parameter. CComCoClass
+provides the default aggregatable policy; NOT_AGGREGATABLE and
+ONLY_AGGREGATABLE declarations select their respective creation paths. Classes
+without CComCoClass or a declared policy retain nonaggregated CComObject
+creation. Existing explicit Creator callbacks keep their nonaggregated contract.
+
+Factories validate the aggregate IID_IUnknown request before calling a creator.
+CComAggObject binds the module before FinalConstruct, keeps the outer pointer
+borrowed, and separates nondelegating inner lifetime from interface references
+that retain the outer. The object pins the engine and application module until
+the contained Base destructor finishes, even after the factory is released.
+See COM_SERVER.md for aggregate map ownership and the qualified native tests.

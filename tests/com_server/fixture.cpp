@@ -45,6 +45,7 @@ class AuxValue : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
                  public ATL::CComCoClass<AuxValue, &CLSID_OpenATLAuxValue>,
                  public IOpenATLValue {
 public:
+    DECLARE_NOT_AGGREGATABLE(AuxValue)
     BEGIN_COM_MAP(AuxValue)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLValue, IOpenATLValue)
     END_COM_MAP()

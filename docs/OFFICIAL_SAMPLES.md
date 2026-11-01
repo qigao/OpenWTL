@@ -163,7 +163,7 @@ qualification.
 This qualifies original **IDL generation, embedded/registered TypeLib loading and one
 real Automation property**, not original COMMap project compilation/link or
 original COMMap class activation.
-The unchanged COMMap still needs aggregation, cached tear-offs, automatic
+The unchanged COMMap still needs cached tear-offs, automatic
 aggregation, full registration/API compatibility, broader `IDispatchImpl` and
 generated `aggreg/aggreg.idl`. All 37 original pure-ATL project
 entries remain **not-qualified**.

@@ -145,8 +145,10 @@ inline void tcscat_s(char* dest, size_t size, const char* src) noexcept
 ///////////////////////////////////////////////////////////////////////////////
 // Threading models
 
+class CComMultiThreadModelNoCS;
 class CComMultiThreadModel {
 public:
+    using ThreadModelNoCS = CComMultiThreadModelNoCS;
     typedef CComAutoCriticalSection AutoCriticalSection;
     typedef CComAutoDeleteCriticalSection AutoDeleteCriticalSection;
     typedef CComCriticalSection CriticalSection;
@@ -164,6 +166,7 @@ public:
 
 class CComSingleThreadModel {
 public:
+    using ThreadModelNoCS = CComSingleThreadModel;
     typedef CComFakeCriticalSection AutoCriticalSection;
     typedef CComFakeCriticalSection AutoDeleteCriticalSection;
     typedef CComFakeCriticalSection CriticalSection;
@@ -181,6 +184,7 @@ public:
 
 class CComMultiThreadModelNoCS {
 public:
+    using ThreadModelNoCS = CComMultiThreadModelNoCS;
     typedef CComFakeCriticalSection AutoCriticalSection;
     typedef CComFakeCriticalSection AutoDeleteCriticalSection;
     typedef CComFakeCriticalSection CriticalSection;
