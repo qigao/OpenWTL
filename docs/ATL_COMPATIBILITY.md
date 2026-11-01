@@ -20,6 +20,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlhost.h`, `atliface.h` | Windowed OLE containment, `CAxWindow`/`CAxWindow2`, site/ambient interfaces and explicit control creation; see [ownership contract](ACTIVEX_HOST.md) |
 | `atlsafe.h`: `CComSafeArray<T, VARTYPE>`, `CComSafeArrayBound` | Native OLEAUT32 array creation, deep copy, attach/detach, checked borrowed element access, copied/transferred resource elements, append, multidimensional access and resize. Explicit destruction preserves ownership on native failure. See SAFEARRAY scope below. |
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
+| `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
@@ -124,7 +125,7 @@ the whole original COMMap DLL build/link or any of the 37 pure-ATL projects pass
 
 **Tracked compatibility gaps:** exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
-TypeLib-driven event sinks/property-notification helpers, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
+TypeLib-driven event sinks, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
 `CComModule` has an implemented legacy object-map subset; its presence is
 not a claim that complete legacy ATL applications already pass. Windowed containment and typed simple
@@ -362,7 +363,7 @@ snapshot/clone retirement gates DllCanUnloadNow on the existing module path.
 
 The implementation uses typed embedded faces rather than Microsoft's internal
 layout. Internal locator/map metadata, exact inheritance/binary layouts,
-TypeLib-driven IDispEventImpl, IPropertyNotifySinkCP/CFirePropNotifyEvent,
+TypeLib-driven IDispEventImpl,
 cross-apartment marshaling of custom interfaces and unchanged original event
 proxy/full-project admission remain unqualified. No target, test mode, export
 or workflow is added. All 36 pinned original Microsoft blobs remain unchanged.
@@ -372,3 +373,52 @@ References: [IConnectionPointImpl](https://learn.microsoft.com/en-us/cpp/atl/ref
 [connection-point macros](https://learn.microsoft.com/en-us/cpp/atl/reference/connection-point-macros),
 [CComDynamicUnkArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomdynamicunkarray-class),
 [CComUnkArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomunkarray-class).
+
+## Property notifications
+
+IPropertyNotifySinkCP<T, CDV> exposes the native property-notification outgoing
+interface through the same connection-point implementation. Its default
+CComDynamicUnkArray or fixed CComUnkArray<N> policy retains ordinary Advise,
+Unadvise, map lookup and enumeration behavior.
+
+CFirePropNotifyEvent takes a sender IUnknown and DISPID. Both static helpers
+enumerate every connection point and its native connections, then QI each
+connected face for IPropertyNotifySink. A sink connected under another outgoing
+IID is included; duplicate subscriptions are separate notification targets.
+A valid sender without a connection-point container, an empty map or an empty
+set of interested sinks returns S_OK. A null sender returns E_POINTER. Native
+QI/enumeration failures propagate; only E_NOINTERFACE denotes an uninterested
+source/sink. Malformed successful enumeration/QI results fail E_UNEXPECTED.
+
+Connection snapshots and all target interfaces are collected before callbacks.
+They retain source/image and sink ownership while callbacks unsubscribe, add
+subscribers, release the caller's sender reference or reenter notification.
+No owner lock is held across property callbacks. Subscribers added during a
+callback join the next notification; a disconnected target in the current
+snapshot remains valid for that notification. Each helper call captures its
+own set; no atomic transaction across concurrent edits or connection points is
+claimed. QI/enumeration/allocation preflight failures cause no notifications.
+
+FireOnRequestEdit stops at the first result other than S_OK, preserving S_FALSE
+as an edit veto as well as propagating errors. The setter owns the decision to
+commit and must test hr != S_OK. FireOnChanged notifies every collected target;
+callback return values are advisory, matching IPropertyNotifySink's requirement
+to return S_OK even when it cannot act. DISPID_UNKNOWN and ordinary DISPIDs are
+passed unchanged. These helpers do not validate or modify property values,
+initialize COM, or implement CComControl/complete ActiveX control behavior.
+
+Existing no-COM core cases verify absence/empty/capacity/error paths, adjusted
+interfaces across different points, edit vetoes, advisory notifications,
+preflight cleanup, reentrant subscriptions and sender/module retirement.
+The existing Value DLL exposes an explicit test property: real direct/native
+STA/MTA aggregated and registered activation cases verify old-value observation
+on request, no commit/notification after denial, new-value observation after
+commit, and notification to sinks reached through another outgoing IID.
+Original event proxies/projects and TypeLib-driven IDispEventImpl remain open.
+No target, test mode, export or workflow is added; all 36 original blobs remain
+unchanged. Printing/hardware HSP remain outside CI.
+
+References: [IPropertyNotifySinkCP](https://learn.microsoft.com/en-us/cpp/atl/reference/ipropertynotifysinkcp-class),
+[CFirePropNotifyEvent](https://learn.microsoft.com/en-us/cpp/atl/reference/cfirepropnotifyevent-class),
+[OnRequestEdit](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipropertynotifysink-onrequestedit),
+[OnChanged](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipropertynotifysink-onchanged).
