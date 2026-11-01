@@ -252,6 +252,13 @@ public:
             SIZEL extent{};
             good = good && control->GetExtent(DVASPECT_CONTENT, &extent) == S_OK && extent.cx == 42 && extent.cy == 4;
         }
+        if (resource == 648) {
+            WCHAR text[16]{};
+            const HWND list = ::GetDlgItem(m_hWnd, 715), combo = ::GetDlgItem(m_hWnd, 716);
+            good = good && ::SendMessageW(list, LB_GETCOUNT, 0, 0) == 1 && ::SendMessageW(combo, CB_GETCOUNT, 0, 0) == 1;
+            good = good && ::SendMessageW(list, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, L"mix");
+            good = good && ::SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, L"mix");
+        }
         WCHAR hostClass[32]{};
         good = ::GetClassNameW(::GetDlgItem(m_hWnd, 711), hostClass, 32) &&
             !::wcscmp(hostClass, resource == 611 || resource == 621 || resource == 632 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
@@ -272,13 +279,16 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
-    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633)}) for (int mode = 0; mode < 5; ++mode) {
+    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633), WORD(648)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
         state.sendInitDuringLoad = mode == 4;
         state.streamBytes = resource == 619 ? 5 : 4;
         ResourceDialog dialog(state); dialog.resource = resource; dialog.modal = mode == 3;
-        if (resource >= 631) {
+        if (resource == 648) {
+            dialog.expectedNew = state.initInterface ? 1 : 0;
+            dialog.expectedLoads = 0;
+        } else if (resource >= 631) {
             dialog.expectedStorages = 1;
             dialog.expectedNew = resource == 633 && state.initInterface ? 1 : 0;
             dialog.expectedLoads = resource == 633 ? 1 : 0;

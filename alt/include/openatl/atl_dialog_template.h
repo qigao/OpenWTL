@@ -14,11 +14,12 @@
 
 namespace ATL { namespace detail {
 struct AxDialogInit {
-    enum class Kind { Stream, New, Storage };
+    enum class Kind { Stream, New, Storage, ListString, ComboString };
     WORD id = 0;
     Kind kind = Kind::Stream;
     std::wstring name, license;
     std::vector<BYTE> stream;
+    bool IsString() const noexcept { return kind == Kind::ListString || kind == Kind::ComboString; }
 };
 struct AxDialogTemplate {
     std::vector<DWORD> storage; // Native dialog templates require DWORD alignment.
@@ -75,10 +76,19 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                     break;
                 }
                 if (!init.Read(message) || !init.Read(length) || length > init.size - init.position) return ERROR_INVALID_DATA;
-                if (message != 0x0376 && message != 0x0377 && message != 0x0378) return ERROR_NOT_SUPPORTED;
-                for (const auto& previous : initialization) if (previous.id == id) return ERROR_INVALID_DATA;
+                if (message != 0x0376 && message != 0x0377 && message != 0x0378 && message != 0x0401 && message != 0x0403) return ERROR_NOT_SUPPORTED;
                 AxDialogInit record; record.id = id;
-                if (message == 0x0378) {
+                if (message == 0x0401) record.kind = AxDialogInit::Kind::ListString;
+                else if (message == 0x0403) record.kind = AxDialogInit::Kind::ComboString;
+                for (const auto& previous : initialization) if (previous.id == id &&
+                    (!record.IsString() || previous.kind != record.kind)) return ERROR_INVALID_DATA;
+                if (record.IsString()) {
+                    // DLGINIT strings are counted ANSI byte strings including
+                    // one final NUL, with no implicit alignment between records.
+                    if (!length || init.bytes[init.position + length - 1] ||
+                        std::memchr(init.bytes + init.position, 0, length - 1)) return ERROR_INVALID_DATA;
+                    record.stream.assign(init.bytes + init.position, init.bytes + init.position + length);
+                } else if (message == 0x0378) {
                     // Only the empty INITNEW record is admitted. Do not infer
                     // license/persistence bytes from an unsupported payload.
                     if (length) return ERROR_NOT_SUPPORTED;
@@ -137,8 +147,25 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
             else { WORD shortId = 0; std::memcpy(&shortId, reader.bytes + start + 16, sizeof(shortId)); id = shortId; }
             AxDialogInit* record = nullptr;
             for (size_t i = 0; i < initialization.size(); ++i) if (initialization[i].id == id) {
-                if (matched[i] || (!clsidClass && !axClass)) return ERROR_INVALID_DATA;
-                matched[i] = true; record = &initialization[i]; break;
+                if (matched[i]) return ERROR_INVALID_DATA;
+                auto& current = initialization[i];
+                if (current.IsString()) {
+                    WORD atom = 0; DWORD itemStyle = 0;
+                    if (itemClass.ordinal) std::memcpy(&atom, reader.bytes + itemClass.begin + sizeof(WORD), sizeof(atom));
+                    std::memcpy(&itemStyle, reader.bytes + start + (extended ? 8 : 0), sizeof(itemStyle));
+                    if (current.kind == AxDialogInit::Kind::ListString) {
+                        if (atom != 0x83 && !reader.Equals(itemClass, L"ListBox", 7)) return ERROR_INVALID_DATA;
+                        if (itemStyle & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE | LBS_NODATA)) return ERROR_NOT_SUPPORTED;
+                    } else {
+                        if (atom != 0x85 && !reader.Equals(itemClass, L"ComboBox", 8)) return ERROR_INVALID_DATA;
+                        if (itemStyle & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) return ERROR_NOT_SUPPORTED;
+                    }
+                    matched[i] = true;
+                    orderedInitialization.push_back(std::move(current));
+                } else {
+                    if (!clsidClass && !axClass) return ERROR_INVALID_DATA;
+                    matched[i] = true; record = &current;
+                }
             }
             if (result.size() > size_t(-1) - 3) return ERROR_NOT_ENOUGH_MEMORY;
             result.resize((result.size() + 3) & ~size_t(3), 0);
