@@ -171,6 +171,56 @@ public:
     void Left(LONG, VARIANT_BOOL, BSTR) { ++left; }
     void Right(LONG, VARIANT_BOOL, BSTR) { ++right; }
 };
+class MapSink : public ATL::IDispEventImpl<51, MapSink>,
+                public ATL::IDispEventSimpleImpl<52, MapSink, &IID_NULL> {
+public:
+    using LeftBase = ATL::IDispEventImpl<51, MapSink>;
+    using RightBase = ATL::IDispEventSimpleImpl<52, MapSink, &IID_NULL>;
+    inline static ATL::_ATL_FUNC_INFO signature = {CC_STDCALL, VT_EMPTY, 3, {VT_I4, VT_BOOL, VT_BSTR}};
+    IUnknown* first = nullptr;
+    IUnknown* second = nullptr;
+    HRESULT lookupSecond = S_OK;
+    int lookups = 0, left = 0, right = 0, bundles = 0;
+    LONG expected = 42;
+    bool correct = true;
+    std::function<void()> callback;
+    ATL::CComVariant retained;
+    BEGIN_SINK_MAP(MapSink)
+        SINK_ENTRY(51, 101, &MapSink::Left)
+        SINK_ENTRY(51, 104, &MapSink::Bundle)
+        SINK_ENTRY_INFO(52, IID_NULL, 101, Right, &signature)
+    END_SINK_MAP()
+    HRESULT GetDlgControl(int id, REFIID iid, void** output) {
+        if (!output) return E_POINTER; *output = nullptr;
+        ++lookups;
+        if (id == 52 && FAILED(lookupSecond)) return lookupSecond;
+        IUnknown* source = id == 51 ? first : id == 52 ? second : nullptr;
+        return source ? source->QueryInterface(iid, output) : E_FAIL;
+    }
+    void Check(LONG value, VARIANT_BOOL enabled, BSTR text) {
+        correct = correct && value == expected && enabled == VARIANT_TRUE && text && std::wcscmp(text, L"typelib event") == 0;
+    }
+    void Left(LONG value, VARIANT_BOOL enabled, BSTR text) { ++left; Check(value, enabled, text); if (callback) callback(); }
+    void Right(LONG value, VARIANT_BOOL enabled, BSTR text) { ++right; Check(value, enabled, text); }
+    void Bundle(VARIANT value) { ++bundles; retained = value; }
+};
+class EmptyMap {
+public:
+    BEGIN_SINK_MAP(EmptyMap)
+    END_SINK_MAP()
+    HRESULT GetDlgControl(int, REFIID, void**) { return E_FAIL; }
+};
+class ConflictingMap : public ATL::IDispEventSimpleImpl<53, ConflictingMap, &IID_NULL> {
+public:
+    inline static ATL::_ATL_FUNC_INFO signature = {CC_STDCALL, VT_EMPTY, 0, {}};
+    int lookups = 0;
+    BEGIN_SINK_MAP(ConflictingMap)
+        SINK_ENTRY_INFO(53, DIID__IOpenATLDispatchEvents, 101, Ignore, &signature)
+        SINK_ENTRY_INFO(53, DIID__IOpenATLSourceDispatch, 102, Ignore, &signature)
+    END_SINK_MAP()
+    void Ignore() {}
+    HRESULT GetDlgControl(int, REFIID, void**) { ++lookups; return E_FAIL; }
+};
 class WrongPointee : public ATL::IDispEventImpl<43, WrongPointee, &DIID__IOpenATLDispatchEvents, &LIBID_OpenATLEventLib, 1, 0, FileHolder> {
 public:
     int calls = 0;
@@ -337,6 +387,55 @@ bool SimpleDiscovery() {
     EVENT_CHECK(point->EnumConnections(&connections.p) == S_OK && connections->Next(1, &data, nullptr) == S_FALSE);
     return true;
 }
+bool MapBinding() {
+    EVENT_CHECK(ATL::AtlAdviseSinkMap<MapSink>(nullptr, true) == E_POINTER);
+    EmptyMap empty;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&empty, true) == S_OK && ATL::AtlAdviseSinkMap(&empty, false) == S_OK);
+    ConflictingMap conflicting;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&conflicting, true) == E_INVALIDARG && !conflicting.lookups);
+    ATL::CComPtr<ATL::CComObject<LegacySource>> first;
+    ATL::CComPtr<ATL::CComObject<PersistSource>> second;
+    EVENT_CHECK(Make(first) && Make(second));
+    MapSink sink; sink.first = first->GetUnknown(); sink.second = second->GetUnknown();
+    auto& left = static_cast<MapSink::LeftBase&>(sink);
+    auto& right = static_cast<MapSink::RightBase&>(sink);
+    sink.lookupSecond = E_ACCESSDENIED;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == E_ACCESSDENIED && sink.lookups == 2);
+    EVENT_CHECK(left.m_dwEventCookie == 0xFEFEFEFE && right.m_dwEventCookie == 0xFEFEFEFE);
+    sink.lookupSecond = S_OK; second->connect = E_ACCESSDENIED; first->eager = true;
+    HRESULT reentrant = S_OK;
+    sink.callback = [&] { reentrant = ATL::AtlAdviseSinkMap(&sink, false); };
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == E_ACCESSDENIED && reentrant == E_UNEXPECTED && sink.left == 1 && sink.correct);
+    EVENT_CHECK(left.m_dwEventCookie == 0xFEFEFEFE && right.m_dwEventCookie == 0xFEFEFEFE);
+    ATL::CComPtr<ITypeInfo> info;
+    EVENT_CHECK(left.GetTypeInfo(0, 0, &info.p) == TYPE_E_LIBNOTREGISTERED && !info.p);
+    first->disconnect = E_ABORT;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == E_ABORT && left.m_dwEventCookie != 0xFEFEFEFE);
+    EVENT_CHECK(left.GetTypeInfo(0, 0, &info.p) == S_OK && info.p); info.Release();
+    first->disconnect = S_OK; sink.first = nullptr; sink.second = nullptr; sink.lookupSecond = E_ACCESSDENIED;
+    const int lookups = sink.lookups;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK && sink.lookups == lookups);
+    sink.first = first->GetUnknown(); sink.second = second->GetUnknown(); sink.lookupSecond = S_OK;
+    second->connect = S_OK; first->eager = false; sink.callback = {};
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == S_OK);
+    EVENT_CHECK(left.GetTypeInfo(0, 0, &info.p) == S_OK && info.p); info.Release();
+    EVENT_CHECK(right.GetTypeInfo(0, 0, &info.p) == E_NOTIMPL && !info.p);
+    EVENT_CHECK(Scalar(first.p) && Scalar(second.p) && sink.correct && sink.right == 1);
+    const int acquired = sink.lookups;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == CONNECT_E_ADVISELIMIT && sink.lookups == acquired);
+    ATL::CComVariant value(L"retained event"); DISPPARAMS params{&value, nullptr, 1, 0};
+    EVENT_CHECK(first->Fire(104, params) == S_OK && sink.bundles == 1 && sink.retained.bstrVal != value.bstrVal);
+    first->disconnect = E_ACCESSDENIED;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == E_ACCESSDENIED && right.m_dwEventCookie == 0xFEFEFEFE);
+    EVENT_CHECK(Scalar(first.p) && Scalar(second.p) && sink.right == 1);
+    first->disconnect = S_OK;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK && ATL::AtlAdviseSinkMap(&sink, false) == S_OK);
+    EVENT_CHECK(left.Advise(first->GetUnknown()) == S_OK);
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == CONNECT_E_ADVISELIMIT);
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK);
+    EVENT_CHECK(sink.retained.vt == VT_BSTR && std::wcscmp(sink.retained.bstrVal, L"retained event") == 0);
+    return true;
+}
 bool MetadataAndCalls() {
     ExplicitSink<FileHolder> sink;
     EVENT_CHECK(static_cast<void*>(static_cast<HandlerBase*>(&sink)) != static_cast<void*>(&sink));
@@ -463,7 +562,7 @@ bool RegisteredMetadata() {
 bool RunAtlTypeLibEventTests() {
     ULONG_PTR token = 0;
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
-    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && DiscoveryFallbacks() && SimpleDiscovery() && RegisteredMetadata());
+    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && DiscoveryFallbacks() && SimpleDiscovery() && MapBinding() && RegisteredMetadata());
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     return true;
 }
@@ -488,6 +587,11 @@ bool RunDllTypeLibEventTests(IOpenATLValue* object) {
     EVENT_CHECK(derived->GetExtra(&value) == S_OK && value == 99 && explicitSink.states == 1);
     EVENT_CHECK(explicitSink.Unadvise(object) == S_OK);
     EVENT_CHECK(explicitSink.retained.vt == VT_BSTR && std::wcscmp(explicitSink.retained.bstrVal, L"retained event") == 0);
+    MapSink mapped; mapped.first = object; mapped.second = object;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&mapped, true) == S_OK);
+    EVENT_CHECK(object->GetValue(&value) == S_OK && value == 42 && mapped.correct && mapped.left == 1 && mapped.right == 1 && mapped.bundles == 1);
+    mapped.first = nullptr; mapped.second = nullptr;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&mapped, false) == S_OK);
     return true;
 }
 bool RunDllPersistEventTests(IOpenATLValue* object) {
@@ -501,5 +605,10 @@ bool RunDllPersistEventTests(IOpenATLValue* object) {
     EVENT_CHECK(object->GetValue(&value) == S_OK && value == 84 && sink.correct && sink.changed == 1);
     EVENT_CHECK(simple.correct && simple.changed == 1 && simple.Unadvise(object) == S_OK);
     EVENT_CHECK(sink.Unadvise(object) == S_OK && object->GetValue(&value) == S_OK && value == 84 && sink.changed == 1);
+    MapSink mapped; mapped.first = object; mapped.second = object; mapped.expected = 84;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&mapped, true) == S_OK);
+    EVENT_CHECK(object->GetValue(&value) == S_OK && value == 84 && mapped.correct && mapped.left == 1 && mapped.right == 1);
+    mapped.first = nullptr; mapped.second = nullptr;
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&mapped, false) == S_OK);
     return true;
 }

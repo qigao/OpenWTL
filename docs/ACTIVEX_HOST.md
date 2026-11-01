@@ -55,6 +55,12 @@ IDispEventSimpleImpl uses the same discovery for Advise and null-IID
 DispEventAdvise. Explicit-IID DispEventAdvise needs no source metadata, and
 SINK_ENTRY_INFO continues to describe invocation. Successful Unadvise restores
 the initial sink identity; failed explicit Unadvise keeps the binding for retry.
+AtlAdviseSinkMap binds one sink base per control ID, deduplicates handler entries
+and rolls back subscriptions on failure. CWindow::GetDlgControl retrieves hosted
+child interfaces when atlhost.h is included. Batch Unadvise uses retained
+sources, attempts every group and preserves failures for retry, including after
+child lookup becomes unavailable. See [sink-map scope](ATL_COMPATIBILITY.md#sink-map-subscriptions)
+for preflight, reentrancy, rollback-failure and remaining composite-control limits.
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
 

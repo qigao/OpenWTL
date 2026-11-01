@@ -8,6 +8,7 @@
 #include <functional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace ATL {
 struct _ATL_FUNC_INFO {
@@ -39,12 +40,15 @@ inline HRESULT AtlUnadvise(IUnknown* source, const IID& iid, DWORD cookie) noexc
 }
 
 namespace detail {
+template<UINT, class> struct SinkMapBinding;
 struct EventEntry {
     UINT control;
     const IID* iid;
     DISPID member;
     const _ATL_FUNC_INFO* info;
     HRESULT (*call)(void*, DISPPARAMS*, const _ATL_FUNC_INFO*, UINT*);
+    HRESULT (*connection)(void*, IUnknown*, const IID*, bool);
+    bool (*connected)(void*);
 };
 template<class A> bool EventAccepts(VARTYPE type) {
     if constexpr (std::is_same_v<A, BSTR>) return type == VT_BSTR;
@@ -164,6 +168,7 @@ inline HRESULT WINAPI AtlGetObjectSourceInterface(IUnknown* object, GUID* librar
 // before destroying it; AddRef/Release do not delete a window or stack owner.
 template<UINT nID, class T, const IID* pdiid>
 class IDispEventSimpleImpl : public IDispatch {
+    template<UINT, class> friend struct detail::SinkMapBinding;
 public:
     IDispEventSimpleImpl() noexcept : iid_(IID_NULL) {
         if constexpr (pdiid != nullptr) iid_ = *pdiid;
@@ -614,19 +619,104 @@ public:
     HRESULT Advise(IUnknown* source) noexcept { return DispEventAdvise(source); }
     HRESULT Unadvise(IUnknown* source) noexcept { return DispEventUnadvise(source); }
 };
+
+namespace detail {
+template<UINT id, class T, const IID* iid>
+IDispEventSimpleImpl<id, T, iid>* LocateEventSink(IDispEventSimpleImpl<id, T, iid>* sink) noexcept { return sink; }
+template<UINT id, class T, const IID* iid, const GUID* library, WORD major, WORD minor, class Holder>
+IDispEventImpl<id, T, iid, library, major, minor, Holder>* LocateEventSink(
+    IDispEventImpl<id, T, iid, library, major, minor, Holder>* sink) noexcept { return sink; }
+
+template<UINT id, class T> struct SinkMapBinding {
+    static bool Connected(void* object) noexcept {
+        return LocateEventSink<id>(static_cast<T*>(object))->point_.p != nullptr;
+    }
+    static HRESULT Connection(void* object, IUnknown* source, const IID* iid, bool advise) noexcept {
+        auto sink = LocateEventSink<id>(static_cast<T*>(object));
+        if (advise) return sink->DispEventAdvise(source, iid);
+        if (!sink->point_) return S_FALSE;
+        // Disconnect the retained source, even after its host window changes
+        // or disappears. The most-derived sink releases its own metadata.
+        CComPtr<IConnectionPointContainer> owner;
+        const HRESULT hr = sink->point_->GetConnectionPointContainer(&owner.p);
+        if (FAILED(hr)) return hr;
+        if (!owner.p) return E_UNEXPECTED;
+        return sink->DispEventUnadvise(owner.p, &IID_NULL);
+    }
+};
+}
+
+template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
+    if (!object) return E_POINTER;
+    bool& changing = object->_OpenATLSinkMapChanging;
+    if (changing) return E_UNEXPECTED;
+    struct Change { bool& flag; explicit Change(bool& value) : flag(value) { flag = true; } ~Change() { flag = false; } } guard(changing);
+    try {
+        struct Group {
+            const detail::EventEntry* entry;
+            const IID* iid;
+            CComPtr<IUnknown> source;
+        };
+        std::vector<Group> groups;
+        for (auto entry = T::_GetSinkMap(); entry->iid; ++entry) {
+            auto found = groups.end();
+            for (auto i = groups.begin(); i != groups.end(); ++i)
+                if (i->entry->control == entry->control) { found = i; break; }
+            if (found == groups.end()) groups.push_back({entry, entry->iid, {}});
+            else if (*entry->iid != IID_NULL) {
+                if (*found->iid != IID_NULL && *found->iid != *entry->iid) return E_INVALIDARG;
+                found->iid = entry->iid;
+            }
+        }
+        if (!advise) {
+            HRESULT failure = S_OK;
+            for (auto& group : groups) {
+                const HRESULT hr = group.entry->connection(object, nullptr, group.iid, false);
+                if (hr != S_OK && hr != S_FALSE && failure == S_OK) failure = FAILED(hr) ? hr : E_UNEXPECTED;
+            }
+            return failure;
+        }
+        // Acquire every source before changing any connection. One nID selects
+        // one compiler-adjusted sink base; repeated handlers share that binding.
+        for (auto& group : groups)
+            if (group.entry->connected(object)) return CONNECT_E_ADVISELIMIT;
+        for (auto& group : groups) {
+            const HRESULT hr = object->GetDlgControl(static_cast<int>(group.entry->control),
+                IID_IUnknown, reinterpret_cast<void**>(&group.source.p));
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !group.source.p) return E_UNEXPECTED;
+        }
+        for (size_t n = 0; n < groups.size(); ++n) {
+            auto& group = groups[n];
+            HRESULT hr = group.entry->connection(object, group.source.p, group.iid, true);
+            if (hr == S_OK) continue;
+            HRESULT failure = FAILED(hr) ? hr : E_UNEXPECTED;
+            while (n) {
+                auto& previous = groups[--n];
+                const HRESULT undone = previous.entry->connection(object, nullptr, previous.iid, false);
+                if (undone != S_OK && undone != S_FALSE) failure = FAILED(undone) ? undone : E_UNEXPECTED;
+            }
+            return failure;
+        }
+        return S_OK;
+    } catch (...) { return detail::AtlObjectException(); }
+}
 } // namespace ATL
 
 #define BEGIN_SINK_MAP(x) \
 public: \
+    bool _OpenATLSinkMapChanging = false; \
     static const ATL::detail::EventEntry* _GetSinkMap() { \
         using _SinkClass = x; \
         static const ATL::detail::EventEntry entries[] = {
 #define SINK_ENTRY_INFO(id, iid, member, handler, info) \
-    { id, &(iid), member, info, &ATL::detail::InvokeMappedEvent<_SinkClass, &_SinkClass::handler> },
+    { id, &(iid), member, info, &ATL::detail::InvokeMappedEvent<_SinkClass, &_SinkClass::handler>, \
+      &ATL::detail::SinkMapBinding<id, _SinkClass>::Connection, &ATL::detail::SinkMapBinding<id, _SinkClass>::Connected },
 #define SINK_ENTRY_EX_P(id, piid, member, handler) \
-    { id, piid, member, nullptr, &ATL::detail::InvokeMappedEvent<_SinkClass, handler> },
+    { id, piid, member, nullptr, &ATL::detail::InvokeMappedEvent<_SinkClass, handler>, \
+      &ATL::detail::SinkMapBinding<id, _SinkClass>::Connection, &ATL::detail::SinkMapBinding<id, _SinkClass>::Connected },
 #define SINK_ENTRY_EX(id, iid, member, handler) SINK_ENTRY_EX_P(id, &(iid), member, handler)
 #define SINK_ENTRY(id, member, handler) SINK_ENTRY_EX(id, IID_NULL, member, handler)
 #define END_SINK_MAP() \
-    { 0, nullptr, 0, nullptr, nullptr } }; return entries; }
+    { 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr } }; return entries; }
 #endif

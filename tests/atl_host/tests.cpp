@@ -141,10 +141,11 @@ bool events() {
     CHECK(source->advises == 2 && source->unadvises == 2 && source->refs == 1);
     return true;
 }
-class BrowserSink : public ATL::IDispEventImpl<1, BrowserSink, &DIID_DWebBrowserEvents2> {
+class BrowserSink : public ATL::CWindow, public ATL::IDispEventImpl<1, BrowserSink, &DIID_DWebBrowserEvents2> {
 public:
+    explicit BrowserSink(HWND parent) : ATL::CWindow(parent) {}
     BEGIN_SINK_MAP(BrowserSink)
-        SINK_ENTRY(1, 259, &BrowserSink::Document)
+        SINK_ENTRY_EX(1, DIID_DWebBrowserEvents2, 259, &BrowserSink::Document)
     END_SINK_MAP()
     void __stdcall Document(IDispatch*, VARIANT* value) { if (value && value->vt == VT_BSTR) ++documents; }
     int documents = 0;
@@ -163,9 +164,16 @@ bool browser() {
     for (int cycle = 0; cycle < 3; ++cycle) {
         BrowserPhase(cycle, "begin");
         CHECK(module.GetLockCount() == 0);
+        struct Parent {
+            HWND window = ::CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 320, 200,
+                nullptr, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+            ~Parent() { if (window) ::DestroyWindow(window); }
+        } parent;
+        CHECK(parent.window);
+        ATL::CWindow container(parent.window);
         ATL::CAxWindow2 window;
         RECT rect{0, 0, 320, 200};
-        CHECK(window.Create(nullptr, &rect, nullptr, WS_POPUP) != nullptr);
+        CHECK(window.Create(parent.window, &rect, nullptr, WS_CHILD, 0, 1U) != nullptr);
         BrowserPhase(cycle, "window-created");
         ATL::CComPtr<IUnknown> raw;
         CHECK(ATL::AtlAxGetControl(window, &raw) == E_NOINTERFACE && !raw);
@@ -174,7 +182,11 @@ bool browser() {
         BrowserPhase(cycle, "webbrowser-created");
         CHECK(module.GetLockCount() == 1);
         ATL::CComPtr<IWebBrowser2> browser;
-        CHECK(window.QueryControl(&browser) == S_OK);
+        CHECK(container.GetDlgControl(1, IID_IWebBrowser2, reinterpret_cast<void**>(&browser.p)) == S_OK);
+        void* missing = reinterpret_cast<void*>(1);
+        CHECK(container.GetDlgControl(99, IID_IUnknown, &missing) == E_FAIL && !missing);
+        CHECK(container.GetDlgControl(1, EventIID, &missing) == E_NOINTERFACE && !missing);
+        CHECK(container.GetDlgControl(1, IID_IUnknown, nullptr) == E_POINTER);
         ATL::CComPtr<IAxWinAmbientDispatch> ambient;
         CHECK(window.QueryHost(&ambient) == S_OK);
         CHECK(ambient->put_DocHostFlags(DOCHOSTUIFLAG_NO3DBORDER | DOCHOSTUIFLAG_THEME) == S_OK);
@@ -182,8 +194,8 @@ bool browser() {
         CHECK(window.QueryHost(&ui) == S_OK);
         DOCHOSTUIINFO info{}; info.cbSize = sizeof(info);
         CHECK(ui->GetHostInfo(&info) == S_OK && (info.dwFlags & DOCHOSTUIFLAG_THEME));
-        BrowserSink sink;
-        CHECK(sink.DispEventAdvise(browser) == S_OK);
+        BrowserSink sink(parent.window);
+        CHECK(ATL::AtlAdviseSinkMap(&sink, true) == S_OK);
         ATL::CComVariant url(L"about:blank#openatl"), empty;
         BrowserPhase(cycle, "navigating");
         CHECK(browser->Navigate2(&url, &empty, &empty, &empty, &empty) == S_OK);
@@ -202,7 +214,7 @@ bool browser() {
         CHECK(html.p != nullptr);
         html.Release(); html = document;
         CHECK(html.p != nullptr);
-        CHECK(sink.DispEventUnadvise(browser) == S_OK);
+        CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK);
         ATL::CComPtr<IOleObject> object;
         CHECK(browser->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&object)) == S_OK);
         ATL::CComPtr<IAxWinHostWindow> host;
@@ -213,6 +225,8 @@ bool browser() {
         reader.join(); CHECK(foreign == RPC_E_WRONG_THREAD);
         BrowserPhase(cycle, "destroying-window");
         CHECK(window.DestroyWindow()); window.m_hWnd = nullptr;
+        missing = reinterpret_cast<void*>(1);
+        CHECK(container.GetDlgControl(1, IID_IUnknown, &missing) == E_FAIL && !missing);
         BrowserPhase(cycle, "window-destroyed");
         ATL::CComPtr<IOleClientSite> site;
         CHECK(object->GetClientSite(&site) == S_OK && !site);
