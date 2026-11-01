@@ -79,8 +79,8 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
     moved = std::move(broken);
     if (broken.p || moved.p != &b1 || b1.refs != 1 || b2.refs != 0)
         return failure(72, "CComPtr_move_replaces_owner", E_FAIL);
-    auto& alias = moved;
-    moved = std::move(alias);
+    auto& moveAlias = moved;
+    moved = std::move(moveAlias);
     if (moved.p != &b1 || b1.refs != 1)
         return failure(73, "CComPtr_self_move_preserves_owner", E_FAIL);
     moved = std::move(broken);
