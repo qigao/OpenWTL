@@ -229,6 +229,60 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         }
     }
 
+    const VARTYPE scalarTypes[] = {VT_EMPTY,VT_NULL,VT_I1,VT_UI1,VT_I2,
+        VT_UI2,VT_BOOL,VT_I4,VT_UI4,VT_INT,VT_UINT,VT_R4,VT_ERROR,
+        VT_I8,VT_UI8,VT_R8,VT_CY,VT_DATE};
+    const ULONG scalarSizes[] = {0,0,1,1,2,2,2,4,4,4,4,4,4,8,8,8,8,8};
+    for (unsigned i=0;i<sizeof(scalarTypes)/sizeof(scalarTypes[0]);++i) {
+        ATL::CComPtr<IStream> fixture;
+        const unsigned char payload[8] = {1,0,0,0,0,0,0,0};
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&fixture)!=S_OK ||
+            fixture->Write(&scalarTypes[i],sizeof(VARTYPE),nullptr)!=S_OK ||
+            fixture->Write(payload,scalarSizes[i],nullptr)!=S_OK ||
+            fixture->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+            return failure(86,"VARIANT_scalar_setup",E_FAIL);
+        ATL::CComVariant value(L"old");
+        hr=value.ReadFromStream(fixture);
+        if (hr!=S_OK || value.vt!=scalarTypes[i] ||
+            std::memcmp(&value.bVal,payload,scalarSizes[i]))
+            return failure(87,"VARIANT_scalar_independent_read",hr);
+        ATL::CComPtr<IStream> encoded;
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&encoded)!=S_OK ||
+            value.WriteToStream(encoded)!=S_OK ||
+            encoded->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+            return failure(88,"VARIANT_scalar_write",E_FAIL);
+        VARTYPE tag=VT_EMPTY;
+        unsigned char actual[8]{};
+        if (encoded->Read(&tag,sizeof(tag),&read)!=S_OK || read!=sizeof(tag) ||
+            tag!=scalarTypes[i] ||
+            encoded->Read(actual,scalarSizes[i],&read)!=S_OK ||
+            read!=scalarSizes[i] || std::memcmp(actual,payload,read))
+            return failure(89,"VARIANT_scalar_independent_bytes",E_FAIL);
+    }
+    ATL::CComPtr<IStream> variantStream;
+    ATL::CComVariant variantText;
+    variantText.vt=VT_BSTR;
+    variantText.bstrVal=a.Copy();
+    ATL::CComVariant variantRead(L"old");
+    if (!variantText.bstrVal ||
+        ::CreateStreamOnHGlobal(nullptr,TRUE,&variantStream)!=S_OK ||
+        variantText.WriteToStream(variantStream)!=S_OK ||
+        variantStream->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
+        variantRead.ReadFromStream(variantStream)!=S_OK || variantRead!=variantText ||
+        variantRead.ReadFromStream(variantStream)!=STG_E_READFAULT || variantRead!=variantText)
+        return failure(90,"VARIANT_BSTR_stream_ownership",E_FAIL);
+    ATL::CComVariant rejected;
+    rejected.vt=VT_BYREF|VT_I4;
+    rejected.plVal=nullptr;
+    STATSTG before{},after{};
+    if (variantStream->Stat(&before,STATFLAG_NONAME)!=S_OK ||
+        rejected.WriteToStream(variantStream)!=DISP_E_BADVARTYPE ||
+        variantStream->Stat(&after,STATFLAG_NONAME)!=S_OK ||
+        before.cbSize.QuadPart!=after.cbSize.QuadPart ||
+        variantRead.ReadFromStream(nullptr)!=E_POINTER ||
+        variantText.WriteToStream(nullptr)!=E_POINTER)
+        return failure(91,"VARIANT_unsupported_no_write",E_FAIL);
+
     ATL::CComVariant va;
     va.vt = VT_BSTR;
     va.bstrVal = ::SysAllocStringLen(embeddedA,3);

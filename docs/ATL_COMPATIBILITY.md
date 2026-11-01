@@ -1132,6 +1132,20 @@ preserve the previous value on failure; the stream position is not rolled
 back. Writes can leave a partial record. Callers must bound untrusted
 stream sizes before invoking this allocation-based API.
 
-This is the first subset of #94. VARIANT streams, property-map stream
+This is the first subset of #94. The bounded VARIANT stream candidate is documented below; property-map stream
 persistence and IPersistStreamInitImpl remain unimplemented. #95–#97 are
 reactivated independent tracks, not completed by these primitives.
+
+## VARIANT stream foundation (qualification pending)
+
+CComVariant stream methods encode a two-byte VARTYPE followed by the native
+Windows little-endian scalar bytes, or the counted CComBSTR record for VT_BSTR.
+Supported: EMPTY, NULL, I1/UI1, I2/UI2, I4/UI4, INT/UINT, I8/UI8, R4/R8,
+ERROR, BOOL, CY and DATE. No raw pointers or VARIANT padding are serialized.
+ARRAY, BYREF, RECORD, DECIMAL and interface values return DISP_E_BADVARTYPE;
+writes reject them before emitting a tag. There is no coercion or activation.
+Reads stage native ownership, preserving the previous value on malformed,
+unsupported or short input, and propagate VariantClear failures (such as a
+locked destination SAFEARRAY). The stream position is not rolled back.
+Property-map persistence is still missing under #94. This is a bounded subset,
+not a claim that all ATL stream formats or interface persistence are supported.
