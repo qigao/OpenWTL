@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <limits>
+#include <utility>
 #include <atlbase.h>
 #include <atlcomcli.h>
 
@@ -40,13 +41,14 @@ static bool no_apartment() {
 // In-process test double only: never registered, activated or published.
 // It rejects QueryInterface to check failed COM identity claims.
 struct BrokenIdentity final : IUnknown {
+    ULONG refs = 0;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
         if (out == nullptr) return E_POINTER;
         *out = nullptr;
         return E_NOINTERFACE;
     }
-    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
 };
 
 static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
@@ -73,6 +75,17 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
     ATL::CComPtr<IUnknown> broken(&b1);
     if (broken.IsEqualObject(&b2))
         return failure(54, "two_failed_QIs_are_not_equal", E_FAIL);
+    ATL::CComPtr<IUnknown> moved(&b2);
+    moved = std::move(broken);
+    if (broken.p || moved.p != &b1 || b1.refs != 1 || b2.refs != 0)
+        return failure(72, "CComPtr_move_replaces_owner", E_FAIL);
+    auto& moveAlias = moved;
+    moved = std::move(moveAlias);
+    if (moved.p != &b1 || b1.refs != 1)
+        return failure(73, "CComPtr_self_move_preserves_owner", E_FAIL);
+    moved = std::move(broken);
+    if (moved.p || b1.refs != 0 || b2.refs != 0)
+        return failure(74, "CComPtr_move_empty_releases_owner", E_FAIL);
 
     ATL::CComPtr<IGlobalInterfaceTable> created;
     hr = created.CoCreateInstance(CLSID_StdGlobalInterfaceTable,

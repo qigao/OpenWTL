@@ -8,23 +8,32 @@ namespace {
 using EventId = _IOpenATLDispatchEvents;
 class Source : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
                public ATL::IConnectionPointContainerImpl<Source>,
-               public ATL::IConnectionPointImpl<Source, &DIID__IOpenATLDispatchEvents>, public IProvideClassInfo2 {
+               public ATL::IConnectionPointImpl<Source, &DIID__IOpenATLDispatchEvents>, public IProvideClassInfo2,
+               public EventFixtureDispatch<Source> {
     using Point = ATL::IConnectionPointImpl<Source, &DIID__IOpenATLDispatchEvents>;
 public:
-    HRESULT metadata = S_OK, connect = S_OK, disconnect = S_OK;
+    HRESULT metadata = S_OK, dispatchMetadata = S_OK, connect = S_OK, disconnect = S_OK;
+    CLSID coclass = CLSID_EventFixtureSource;
     bool eager = false;
     BEGIN_COM_MAP(Source)
         COM_INTERFACE_ENTRY(IConnectionPointContainer)
         COM_INTERFACE_ENTRY(IProvideClassInfo2)
         COM_INTERFACE_ENTRY2(IProvideClassInfo, IProvideClassInfo2)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
     END_COM_MAP()
     BEGIN_CONNECTION_POINT_MAP(Source)
         CONNECTION_POINT_ENTRY(DIID__IOpenATLDispatchEvents)
     END_CONNECTION_POINT_MAP()
     HRESULT STDMETHODCALLTYPE GetClassInfo(ITypeInfo** output) noexcept override {
         if (!output) return E_POINTER; *output = nullptr;
-        return FAILED(metadata) ? metadata : LoadEventFixtureType(CLSID_EventFixtureSource, output);
+        return FAILED(metadata) ? metadata : LoadEventFixtureType(coclass, output);
     }
+    HRESULT GetFixtureDispatchTypeInfo(ITypeInfo** output) noexcept {
+        if (!output) return E_POINTER; *output = nullptr;
+        return FAILED(dispatchMetadata) ? dispatchMetadata : LoadEventFixtureType(DIID__IOpenATLSourceDispatch, output);
+    }
+    LONG FixtureCurrentValue() const noexcept { return 42; }
     HRESULT STDMETHODCALLTYPE GetGUID(DWORD kind, GUID* output) noexcept override {
         if (!output) return E_POINTER; *output = GUID_NULL;
         if (kind != GUIDKIND_DEFAULT_SOURCE_DISP_IID) return E_INVALIDARG;
@@ -58,6 +67,41 @@ public:
         }
     }
 };
+// Each object has its own COM map. QueryInterface through any exposed interface
+// therefore advertises exactly the provider set under test.
+class LegacySource : public Source {
+public:
+    BEGIN_COM_MAP(LegacySource)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+        COM_INTERFACE_ENTRY(IProvideClassInfo)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
+    END_COM_MAP()
+};
+class PersistSource : public Source, public IPersist {
+public:
+    CLSID identity = CLSID_EventFixtureSource;
+    HRESULT classId = S_OK;
+    BEGIN_COM_MAP(PersistSource)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) noexcept override {
+        if (!output) return E_POINTER; *output = CLSID_NULL;
+        if (FAILED(classId)) return classId;
+        *output = identity; return S_OK;
+    }
+};
+class DispatchOnlySource : public Source {
+public:
+    BEGIN_COM_MAP(DispatchOnlySource)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
+    END_COM_MAP()
+};
 template<class T> bool Make(ATL::CComPtr<ATL::CComObject<T>>& result) {
     ATL::CComObject<T>* raw = nullptr;
     EVENT_CHECK(ATL::CComObject<T>::CreateInstance(&raw) == S_OK && raw);
@@ -74,10 +118,11 @@ public:
 };
 struct HandlerBase {
     int changed = 0;
+    LONG expected = 42;
     bool correct = false;
     std::function<void()> callback;
     void Changed(LONG number, VARIANT_BOOL enabled, BSTR text) {
-        ++changed; correct = number == 42 && enabled == VARIANT_TRUE && text && std::wcscmp(text, L"typelib event") == 0;
+        ++changed; correct = number == expected && enabled == VARIANT_TRUE && text && std::wcscmp(text, L"typelib event") == 0;
         if (callback) callback();
     }
 };
@@ -131,6 +176,82 @@ bool Scalar(Source* source) {
     args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;
     DISPPARAMS params{args, nullptr, 3, 0};
     EVENT_CHECK(source->Fire(101, params) == S_OK);
+    return true;
+}
+bool SourceInformation(IUnknown* object, HRESULT expected = S_OK) {
+    GUID library = IID_IUnknown; IID outgoing = IID_IDispatch;
+    unsigned short major = 99, minor = 99;
+    EVENT_CHECK(ATL::AtlGetObjectSourceInterface(object, &library, &outgoing, &major, &minor) == expected);
+    if (expected == S_OK) {
+        EVENT_CHECK(library == LIBID_OpenATLEventLib && outgoing == DIID__IOpenATLDispatchEvents && major == 1 && minor == 0);
+    } else {
+        EVENT_CHECK(library == GUID_NULL && outgoing == IID_NULL && !major && !minor);
+    }
+    return true;
+}
+bool IncomingDispatch(IUnknown* object, LONG expected) {
+    ATL::CComPtr<IDispatch> dispatch;
+    EVENT_CHECK(object->QueryInterface(IID_IDispatch, reinterpret_cast<void**>(&dispatch.p)) == S_OK);
+    LPOLESTR name = const_cast<LPOLESTR>(L"Current"); DISPID member = DISPID_UNKNOWN;
+    EVENT_CHECK(dispatch->GetIDsOfNames(IID_NULL, &name, 1, LOCALE_USER_DEFAULT, &member) == S_OK);
+    DISPPARAMS empty{}; ATL::CComVariant result;
+    EVENT_CHECK(dispatch->Invoke(member, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET,
+        &empty, &result, nullptr, nullptr) == S_OK && result.vt == VT_I4 && result.lVal == expected);
+    return true;
+}
+bool DiscoveryFallbacks() {
+    EVENT_CHECK(SourceInformation(nullptr, E_POINTER));
+    ATL::CComPtr<ATL::CComObject<Source>> modern;
+    ATL::CComPtr<ATL::CComObject<LegacySource>> legacy;
+    ATL::CComPtr<ATL::CComObject<PersistSource>> persisted;
+    ATL::CComPtr<ATL::CComObject<DispatchOnlySource>> dispatchOnly;
+    EVENT_CHECK(Make(modern) && Make(legacy) && Make(persisted) && Make(dispatchOnly));
+    GUID library = IID_IUnknown; IID outgoing = IID_IDispatch; unsigned short major = 99, minor = 99;
+    EVENT_CHECK(ATL::AtlGetObjectSourceInterface(modern->GetUnknown(), nullptr, &outgoing, &major, &minor) == E_POINTER);
+    EVENT_CHECK(outgoing == IID_NULL && !major && !minor);
+    EVENT_CHECK(ATL::AtlGetObjectSourceInterface(modern->GetUnknown(), &library, nullptr, &major, &minor) == E_POINTER && library == GUID_NULL);
+    EVENT_CHECK(ATL::AtlGetObjectSourceInterface(modern->GetUnknown(), &library, &outgoing, nullptr, &minor) == E_POINTER);
+    EVENT_CHECK(ATL::AtlGetObjectSourceInterface(modern->GetUnknown(), &library, &outgoing, &major, nullptr) == E_POINTER);
+    EVENT_CHECK(SourceInformation(modern->GetUnknown()) && SourceInformation(legacy->GetUnknown()));
+    EVENT_CHECK(IncomingDispatch(legacy->GetUnknown(), 42));
+    ATL::CComPtr<IProvideClassInfo2> absent;
+    EVENT_CHECK(legacy->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&absent.p)) == E_NOINTERFACE && !absent.p);
+    DynamicSink sink;
+    legacy->coclass = CLSID_NoDefaultEventFixtureSource;
+    EVENT_CHECK(SourceInformation(legacy->GetUnknown(), CONNECT_E_NOCONNECTION));
+    EVENT_CHECK(sink.Advise(legacy->GetUnknown()) == CONNECT_E_NOCONNECTION);
+    legacy->coclass = DIID__IOpenATLDispatchEvents;
+    EVENT_CHECK(SourceInformation(legacy->GetUnknown(), E_UNEXPECTED) && sink.Advise(legacy->GetUnknown()) == E_UNEXPECTED);
+    legacy->coclass = CLSID_EventFixtureSource; legacy->metadata = E_ACCESSDENIED;
+    EVENT_CHECK(SourceInformation(legacy->GetUnknown(), E_ACCESSDENIED) && sink.Advise(legacy->GetUnknown()) == E_ACCESSDENIED);
+    legacy->metadata = S_OK; legacy->connect = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Advise(legacy->GetUnknown()) == E_ACCESSDENIED);
+    legacy->connect = S_OK;
+    EVENT_CHECK(sink.Advise(legacy->GetUnknown()) == S_OK && Scalar(legacy.p) && sink.correct && sink.Unadvise(legacy->GetUnknown()) == S_OK);
+    ATL::CComPtr<IProvideClassInfo> noProvider;
+    EVENT_CHECK(persisted->QueryInterface(IID_IProvideClassInfo, reinterpret_cast<void**>(&noProvider.p)) == E_NOINTERFACE && !noProvider.p);
+    persisted->classId = E_ACCESSDENIED;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown(), E_ACCESSDENIED) && sink.Advise(persisted->GetUnknown()) == E_ACCESSDENIED);
+    persisted->classId = S_OK; persisted->identity = CLSID_NULL;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown(), E_UNEXPECTED));
+    persisted->identity = CLSID_EventFixtureSource; persisted->identity.Data1 ^= 0x10000000;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown(), TYPE_E_ELEMENTNOTFOUND));
+    persisted->identity = CLSID_NoDefaultEventFixtureSource;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown(), CONNECT_E_NOCONNECTION));
+    persisted->identity = CLSID_EventFixtureSource; persisted->dispatchMetadata = E_ACCESSDENIED;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown(), E_ACCESSDENIED) && sink.Advise(persisted->GetUnknown()) == E_ACCESSDENIED);
+    persisted->dispatchMetadata = S_OK;
+    EVENT_CHECK(SourceInformation(persisted->GetUnknown()) && IncomingDispatch(persisted->GetUnknown(), 42));
+    EVENT_CHECK(sink.Advise(persisted->GetUnknown()) == S_OK && Scalar(persisted.p) && sink.correct);
+    persisted->disconnect = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Unadvise(persisted->GetUnknown()) == E_ACCESSDENIED && Scalar(persisted.p));
+    persisted->disconnect = S_OK;
+    EVENT_CHECK(sink.Unadvise(persisted->GetUnknown()) == S_OK);
+    EVENT_CHECK(SourceInformation(dispatchOnly->GetUnknown(), E_NOINTERFACE));
+    EVENT_CHECK(sink.Advise(dispatchOnly->GetUnknown()) == E_NOINTERFACE);
+    // An explicitly supplied outgoing IID needs only the incoming library.
+    EVENT_CHECK(sink.DispEventAdvise(dispatchOnly->GetUnknown(), &DIID__IOpenATLDispatchEvents) == S_OK && Scalar(dispatchOnly.p) && sink.correct);
+    EVENT_CHECK(sink.Unadvise(dispatchOnly->GetUnknown()) == S_OK);
     return true;
 }
 bool MetadataAndCalls() {
@@ -259,11 +380,14 @@ bool RegisteredMetadata() {
 bool RunAtlTypeLibEventTests() {
     ULONG_PTR token = 0;
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
-    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && RegisteredMetadata());
+    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && DiscoveryFallbacks() && RegisteredMetadata());
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     return true;
 }
 bool RunDllTypeLibEventTests(IOpenATLValue* object) {
+    EVENT_CHECK(SourceInformation(object) && IncomingDispatch(object, 42));
+    ATL::CComPtr<IProvideClassInfo2> absent;
+    EVENT_CHECK(object->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&absent.p)) == E_NOINTERFACE && !absent.p);
     ExplicitSink<FileHolder> explicitSink;
     DynamicSink inferred;
     EVENT_CHECK(inferred.Advise(object) == S_OK && explicitSink.Advise(object) == S_OK);
@@ -279,5 +403,16 @@ bool RunDllTypeLibEventTests(IOpenATLValue* object) {
     EVENT_CHECK(derived->GetExtra(&value) == S_OK && value == 99 && explicitSink.states == 1);
     EVENT_CHECK(explicitSink.Unadvise(object) == S_OK);
     EVENT_CHECK(explicitSink.retained.vt == VT_BSTR && std::wcscmp(explicitSink.retained.bstrVal, L"retained event") == 0);
+    return true;
+}
+bool RunDllPersistEventTests(IOpenATLValue* object) {
+    EVENT_CHECK(SourceInformation(object) && IncomingDispatch(object, 84));
+    ATL::CComPtr<IProvideClassInfo> absent;
+    EVENT_CHECK(object->QueryInterface(IID_IProvideClassInfo, reinterpret_cast<void**>(&absent.p)) == E_NOINTERFACE && !absent.p);
+    DynamicSink sink; sink.expected = 84;
+    EVENT_CHECK(sink.Advise(object) == S_OK);
+    LONG value = 0;
+    EVENT_CHECK(object->GetValue(&value) == S_OK && value == 84 && sink.correct && sink.changed == 1);
+    EVENT_CHECK(sink.Unadvise(object) == S_OK && object->GetValue(&value) == S_OK && value == 84 && sink.changed == 1);
     return true;
 }

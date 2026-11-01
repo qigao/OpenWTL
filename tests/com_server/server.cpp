@@ -39,6 +39,7 @@ bool RunRgsRegistryTests();
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
 bool RunOriginalCommapTypeLibTest(const char* path);
 bool RunDllTypeLibEventTests(IOpenATLValue* object);
+bool RunDllPersistEventTests(IOpenATLValue* object);
 #endif
 namespace {
 std::atomic<int> live{0};
@@ -1760,6 +1761,9 @@ bool native(DWORD apartment) {
     REQUIRE(::CoCreateInstance(CLSID_OpenATLAuxValue, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_OpenATLValue, reinterpret_cast<void**>(&secondObject)) == S_OK);
     REQUIRE(secondObject->GetValue(&value) == S_OK && value == 84);
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    REQUIRE(RunDllPersistEventTests(secondObject.p));
+#endif
     REQUIRE(dll.unload() == S_FALSE);
     object.Release();
     secondObject.Release();

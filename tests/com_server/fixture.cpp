@@ -25,7 +25,7 @@ class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public ATL::IPropertyNotifySinkCP<Value>
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
               , public ATL::IConnectionPointImpl<Value, &DIID__IOpenATLDispatchEvents>,
-                public IProvideClassInfo2
+                public IProvideClassInfo, public EventFixtureDispatch<Value>
 #endif
               {
     using ValueEvents = ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents>;
@@ -66,8 +66,9 @@ public:
         COM_INTERFACE_ENTRY(ISupportErrorInfo)
         COM_INTERFACE_ENTRY(IConnectionPointContainer)
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
-        COM_INTERFACE_ENTRY(IProvideClassInfo2)
-        COM_INTERFACE_ENTRY2(IProvideClassInfo, IProvideClassInfo2)
+        COM_INTERFACE_ENTRY(IProvideClassInfo)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
 #endif
     END_COM_MAP()
     BEGIN_CONNECTION_POINT_MAP(Value)
@@ -140,27 +141,77 @@ public:
     HRESULT STDMETHODCALLTYPE GetClassInfo(ITypeInfo** output) noexcept override {
         return LoadEventFixtureType(CLSID_EventFixtureSource, output);
     }
-    HRESULT STDMETHODCALLTYPE GetGUID(DWORD kind, GUID* output) noexcept override {
-        if (!output) return E_POINTER; *output = GUID_NULL;
-        if (kind != GUIDKIND_DEFAULT_SOURCE_DISP_IID) return E_INVALIDARG;
-        *output = DIID__IOpenATLDispatchEvents; return S_OK;
+    HRESULT GetFixtureDispatchTypeInfo(ITypeInfo** output) noexcept {
+        return LoadEventFixtureType(DIID__IOpenATLSourceDispatch, output);
     }
+    LONG FixtureCurrentValue() const noexcept { return 42; }
 #endif
 };
 OBJECT_ENTRY_AUTO(CLSID_OpenATLValue, Value)
 
 class AuxValue : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
                  public ATL::CComCoClass<AuxValue, &CLSID_OpenATLAuxValue>,
-                 public IOpenATLValue {
+                 public IOpenATLValue
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+                 , public EventFixtureDispatch<AuxValue>, public IPersist,
+                   public ATL::IConnectionPointContainerImpl<AuxValue>,
+                   public ATL::IConnectionPointImpl<AuxValue, &DIID__IOpenATLDispatchEvents>
+#endif
+                 {
 public:
     DECLARE_NOT_AGGREGATABLE(AuxValue)
     BEGIN_COM_MAP(AuxValue)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLValue, IOpenATLValue)
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        COM_INTERFACE_ENTRY(IDispatch)
+        COM_INTERFACE_ENTRY_IID(DIID__IOpenATLSourceDispatch, IDispatch)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+#endif
     END_COM_MAP()
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    BEGIN_CONNECTION_POINT_MAP(AuxValue)
+        CONNECTION_POINT_ENTRY(DIID__IOpenATLDispatchEvents)
+    END_CONNECTION_POINT_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) noexcept override {
+        if (!output) return E_POINTER; *output = CLSID_OpenATLAuxValue; return S_OK;
+    }
+    HRESULT GetFixtureDispatchTypeInfo(ITypeInfo** output) noexcept {
+        return LoadEventFixtureType(DIID__IOpenATLSourceDispatch, output);
+    }
+    LONG FixtureCurrentValue() const noexcept { return 84; }
+#endif
     DECLARE_REGISTRY_RESOURCE(L"OPENATL_AUX_NAMED")
     HRESULT STDMETHODCALLTYPE GetValue(LONG* value) noexcept override {
         if (!value) return E_POINTER;
         *value = 84;
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        using Events = ATL::IConnectionPointImpl<AuxValue, &DIID__IOpenATLDispatchEvents>;
+        ATL::CComPtr<IEnumConnections> snapshot;
+        HRESULT hr = Events::EnumConnections(&snapshot.p);
+        if (FAILED(hr)) return hr;
+        ATL::CComPtr<ITypeInfo> info;
+        DISPID member = DISPID_UNKNOWN;
+        for (;;) {
+            CONNECTDATA data{}; hr = snapshot->Next(1, &data, nullptr);
+            if (hr == S_FALSE) break;
+            if (FAILED(hr)) return hr;
+            ATL::CComPtr<IUnknown> held; held.Attach(data.pUnk);
+            if (!info) {
+                hr = LoadEventFixtureType(DIID__IOpenATLDispatchEvents, &info.p);
+                if (FAILED(hr)) return hr;
+                LPOLESTR name = const_cast<LPOLESTR>(L"Changed");
+                hr = info->GetIDsOfNames(&name, 1, &member);
+                if (FAILED(hr)) return hr;
+            }
+            ATL::CComVariant args[3] = {ATL::CComVariant(L"typelib event"), ATL::CComVariant(VARIANT_TRUE), ATL::CComVariant(84L)};
+            args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;
+            DISPPARAMS params{args, nullptr, 3, 0};
+            hr = static_cast<IDispatch*>(data.pUnk)->Invoke(member, IID_NULL, LOCALE_USER_DEFAULT,
+                DISPATCH_METHOD, &params, nullptr, nullptr, nullptr);
+            if (FAILED(hr) && hr != DISP_E_MEMBERNOTFOUND) return hr;
+        }
+#endif
         return S_OK;
     }
 };
