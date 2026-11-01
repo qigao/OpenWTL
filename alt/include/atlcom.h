@@ -45,6 +45,7 @@ template<class ThreadModel>
 class CComObjectRootEx : public CComObjectRootBase {
 public:
     using _ThreadModel = ThreadModel;
+    virtual IUnknown* GetControllingUnknown() noexcept { return m_pOuterUnknown; }
     ULONG InternalAddRef() noexcept {
         ULONG count = ThreadModel::Increment(&m_dwRef);
         if (count == 0) std::terminate();
@@ -130,7 +131,7 @@ public:
         if (!count) delete this;
         return count;
     }
-    virtual IUnknown* GetControllingUnknown() noexcept { return this->GetUnknown(); }
+    IUnknown* GetControllingUnknown() noexcept override { return this->GetUnknown(); }
     // ATL's local creator returns a raw object with reference count ZERO.
     static HRESULT WINAPI CreateInstance(CComObject** output) noexcept {
         return CreateObject(nullptr, output);
@@ -186,7 +187,7 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() noexcept override { return this->OuterAddRef(); }
     ULONG STDMETHODCALLTYPE Release() noexcept override { return this->OuterRelease(); }
-    virtual IUnknown* GetControllingUnknown() noexcept { return this->m_pOuterUnknown; }
+    IUnknown* GetControllingUnknown() noexcept override { return this->m_pOuterUnknown; }
 };
 
 template<class Base>
@@ -256,6 +257,192 @@ private:
     }
 };
 
+template<class Owner, class ThreadModel = CComObjectThreadModel>
+class CComTearOffObjectBase : public CComObjectRootEx<ThreadModel> {
+public:
+    using _OpenATLOwner = Owner;
+    // Store the actual Owner subobject, including inside CComContainedObject.
+    // No cast to a fictitious CComObject<Owner> allocation is permitted.
+    Owner* m_pOwner = nullptr;
+};
+
+namespace detail {
+template<class Owner> IUnknown* TearOffControl(void* owner) {
+    if (!owner) throw CAtlException(E_INVALIDARG);
+    return static_cast<CComObject<Owner>*>(owner)->GetControllingUnknown();
+}
+template<class Tear> struct TearOffEntryTag { inline static const char value = 0; };
+class TearOffOwnerReference {
+public:
+    explicit TearOffOwnerReference(IUnknown* owner) : owner_(owner) {
+        if (!owner_) throw CAtlException(E_INVALIDARG);
+        owner_->AddRef();
+    }
+    ~TearOffOwnerReference() { owner_->Release(); }
+    IUnknown* _OpenATLOwnerUnknown() const noexcept { return owner_; }
+private:
+    IUnknown* owner_;
+};
+// Same-thread construction cycles fail before another allocation. Other
+// threads serialize cached publication through the owner's normal lock.
+struct TearOffConstruction {
+    inline static thread_local const TearOffConstruction* current = nullptr;
+    const TearOffConstruction* previous = nullptr;
+    const void* owner;
+    const void* key;
+    bool active = false;
+    TearOffConstruction(const void* object, const void* entry) noexcept
+        : owner(object), key(entry) {
+        size_t depth = 0;
+        for (auto* item = current; item; item = item->previous) {
+            if ((item->owner == owner && item->key == key) || ++depth >= 64) return;
+        }
+        previous = current;
+        current = this;
+        active = true;
+    }
+    ~TearOffConstruction() { if (active) current = previous; }
+};
+template<class Owner> struct TearOffOwnerLock {
+    Owner& owner;
+    explicit TearOffOwnerLock(Owner& value) noexcept : owner(value) { owner.Lock(); }
+    ~TearOffOwnerLock() { owner.Unlock(); }
+};
+} // namespace detail
+
+template<class Base>
+class CComTearOffObject : private detail::AtlObjectModulePin,
+                         private detail::TearOffOwnerReference, public Base {
+public:
+    using Owner = typename Base::_OpenATLOwner;
+    explicit CComTearOffObject(void* owner)
+        : CComTearOffObject(static_cast<Owner*>(static_cast<CComObject<Owner>*>(owner)),
+                           detail::TearOffControl<Owner>(owner)) {}
+    CComTearOffObject(Owner* owner, IUnknown* identity)
+        : detail::TearOffOwnerReference(identity) {
+        if (!owner) throw CAtlException(E_INVALIDARG);
+        this->m_pOwner = owner;
+        this->m_pOuterUnknown = identity;
+    }
+    ~CComTearOffObject() { this->FinalRelease(); }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown))
+            return _OpenATLOwnerUnknown()->QueryInterface(iid, output);
+        const HRESULT hr = this->_InternalQueryInterface(iid, output);
+        return hr == E_NOINTERFACE ? _OpenATLOwnerUnknown()->QueryInterface(iid, output) : hr;
+    }
+    template<class Q> HRESULT QueryInterface(Q** output) noexcept {
+        return QueryInterface(__uuidof(Q), reinterpret_cast<void**>(output));
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return this->InternalAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override {
+        const ULONG count = this->InternalRelease();
+        if (!count) delete this;
+        return count;
+    }
+    IUnknown* GetControllingUnknown() noexcept override { return _OpenATLOwnerUnknown(); }
+    static HRESULT CreateInstance(Owner* owner, IUnknown* identity, REFIID iid,
+                                  void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!owner || !identity) return E_INVALIDARG;
+        CComTearOffObject* object = nullptr;
+        try { object = new CComTearOffObject(owner, identity); }
+        catch (...) { return detail::AtlObjectException(); }
+        object->InternalFinalConstructAddRef();
+        HRESULT hr;
+        try { hr = object->FinalConstruct(); }
+        catch (...) { hr = detail::AtlObjectException(); }
+        if (SUCCEEDED(hr)) hr = object->QueryInterface(iid, output);
+        // Keep an ordinary ref during QI and destroy on every failed path.
+        object->Release();
+        return hr;
+    }
+};
+
+template<class Base>
+class CComCachedTearOffObject : public CComAggObject<Base> {
+public:
+    using Owner = typename Base::_OpenATLOwner;
+    explicit CComCachedTearOffObject(void* owner)
+        : CComCachedTearOffObject(static_cast<Owner*>(static_cast<CComObject<Owner>*>(owner)),
+                                 detail::TearOffControl<Owner>(owner)) {}
+    CComCachedTearOffObject(Owner* owner, IUnknown* identity) : CComAggObject<Base>(identity) {
+        if (!owner || !identity) throw CAtlException(E_INVALIDARG);
+        this->m_contained.m_pOwner = owner;
+    }
+    ULONG STDMETHODCALLTYPE Release() noexcept override {
+        const ULONG count = this->InternalRelease();
+        if (!count) delete this;
+        return count;
+    }
+    static HRESULT CreateInstance(Owner* owner, IUnknown* identity,
+                                  CComCachedTearOffObject** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!owner || !identity) return E_INVALIDARG;
+        CComCachedTearOffObject* object = nullptr;
+        try { object = new CComCachedTearOffObject(owner, identity); }
+        catch (...) { return detail::AtlObjectException(); }
+        object->InternalFinalConstructAddRef();
+        HRESULT hr;
+        try { hr = object->FinalConstruct(); }
+        catch (...) { hr = detail::AtlObjectException(); }
+        object->InternalFinalConstructRelease();
+        if (FAILED(hr)) { delete object; return hr; }
+        *output = object; // Private cache IUnknown starts with zero refs.
+        return S_OK;
+    }
+};
+
+namespace detail {
+inline HRESULT QueryAggregate(IUnknown*, REFIID, void**, bool&) noexcept;
+template<class Tear, class Owner>
+HRESULT QueryTearOff(Owner* owner, REFIID iid, void** output, bool& owned) noexcept {
+    *output = nullptr;
+    using DataOwner = typename Tear::_OpenATLOwner;
+    auto* data = static_cast<DataOwner*>(owner);
+    TearOffConstruction constructing(data, &TearOffEntryTag<Tear>::value);
+    if (!constructing.active) return E_UNEXPECTED;
+    auto* identity = owner->GetControllingUnknown();
+    if (!identity) return E_UNEXPECTED;
+    const HRESULT hr = CComTearOffObject<Tear>::CreateInstance(data, identity, iid, output);
+    owned = hr == S_OK;
+    return hr;
+}
+template<class Tear, class Owner>
+HRESULT QueryCachedTearOff(Owner* owner, IUnknown*& cache, REFIID iid,
+                            void** output, bool& owned) noexcept {
+    *output = nullptr;
+    auto* identity = owner->GetControllingUnknown();
+    if (!identity) return E_UNEXPECTED;
+    // Temporary protection only. A cached private IUnknown never owns the
+    // controlling owner; public contained interfaces retain it instead.
+    CComPtr<IUnknown> protect(identity);
+    TearOffOwnerLock<Owner> lock(*owner);
+    if (cache) return QueryAggregate(cache, iid, output, owned);
+    TearOffConstruction constructing(static_cast<typename Tear::_OpenATLOwner*>(owner), &cache);
+    if (!constructing.active) return E_UNEXPECTED;
+    using Object = CComCachedTearOffObject<Tear>;
+    Object* object = nullptr;
+    const HRESULT created = Object::CreateInstance(
+        static_cast<typename Tear::_OpenATLOwner*>(owner), identity, &object);
+    if (FAILED(created)) return created;
+    object->AddRef();
+    const HRESULT hr = object->QueryInterface(iid, output);
+    if (hr != S_OK || !*output) {
+        object->Release();
+        *output = nullptr;
+        return SUCCEEDED(hr) ? E_UNEXPECTED : hr;
+    }
+    cache = static_cast<IUnknown*>(object); // Transfer one private owning ref.
+    owned = true;
+    return S_OK;
+}
+} // namespace detail
+
 template<class ObjectType>
 class CComCreator {
 public:
@@ -299,6 +486,41 @@ public:
     static HRESULT CreateInstance(OpenATL::COM::Module& module, IUnknown* outer,
                                   REFIID iid, void** output) noexcept {
         return CComAggObject<Base>::CreateInstance(module, outer, iid, output);
+    }
+};
+
+template<class Base>
+class CComCreator<CComTearOffObject<Base>> {
+public:
+    static HRESULT WINAPI CreateInstance(void* owner, REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!owner) return E_INVALIDARG;
+        using Owner = typename Base::_OpenATLOwner;
+        auto* object = static_cast<CComObject<Owner>*>(owner);
+        return CComTearOffObject<Base>::CreateInstance(static_cast<Owner*>(object),
+            object->GetControllingUnknown(), iid, output);
+    }
+};
+template<class Base>
+class CComCreator<CComCachedTearOffObject<Base>> {
+public:
+    static HRESULT WINAPI CreateInstance(void* owner, REFIID iid, void** output) noexcept {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!owner) return E_INVALIDARG;
+        // Only the owner may hold the cache's private IUnknown. Publishing a
+        // public contained interface without its private anchor would dangle.
+        if (!IsEqualIID(iid, IID_IUnknown)) return E_NOINTERFACE;
+        using Owner = typename Base::_OpenATLOwner;
+        auto* value = static_cast<CComObject<Owner>*>(owner);
+        CComCachedTearOffObject<Base>* object = nullptr;
+        HRESULT hr = CComCachedTearOffObject<Base>::CreateInstance(
+            static_cast<Owner*>(value), value->GetControllingUnknown(), &object);
+        if (FAILED(hr)) return hr;
+        object->AddRef();
+        *output = static_cast<IUnknown*>(object);
+        return S_OK;
     }
 };
 
@@ -441,6 +663,12 @@ public: \
             ::ATL::detail::QueryAggregate(this->member, iid, output, owned); \
         if (_atlAggregateHr != E_NOINTERFACE) return _atlAggregateHr; \
     }
+#define COM_INTERFACE_ENTRY_TEAR_OFF(id, type) \
+    if (!IsEqualIID(iid, IID_IUnknown) && IsEqualIID(iid, id)) \
+        return ::ATL::detail::QueryTearOff<type>(this, iid, output, owned);
+#define COM_INTERFACE_ENTRY_CACHED_TEAR_OFF(id, type, member) \
+    if (!IsEqualIID(iid, IID_IUnknown) && IsEqualIID(iid, id)) \
+        return ::ATL::detail::QueryCachedTearOff<type>(this, this->member, iid, output, owned);
 #define END_COM_MAP() \
         (void)_atlFirst; \
         return E_NOINTERFACE; \
@@ -511,7 +739,7 @@ public: \
     using _CreatorClass = ATL::CComCreator2<ATL::CComFailCreator<E_FAIL>, \
                                           ATL::CComCreator<ATL::CComAggObject<x>>>;
 #define DECLARE_GET_CONTROLLING_UNKNOWN() \
-    virtual IUnknown* GetControllingUnknown() noexcept = 0;
+    IUnknown* GetControllingUnknown() noexcept override = 0;
 #define DECLARE_NOT_AGGREGATABLE(x) \
     using _CreatorClass = ATL::CComCreator<ATL::CComObject<x>>;
 #define DECLARE_PROTECT_FINAL_CONSTRUCT() \

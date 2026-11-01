@@ -3,17 +3,18 @@
 COM Server and COM Client are both mandatory OpenATL capabilities. The
 existing source-owned server core under `OpenATL::COM` complements
 `atlcom.h` and provides
-nonaggregated COM objects, explicit interface/class tables, class factories,
+ordinary and aggregated COM objects, explicit interface/class tables, class factories,
 module lifetime accounting, and explicit registry registration. Standard ATL
 DLL module exports and `OBJECT_ENTRY_AUTO` class discovery exist. A class
 can now supply its own real `UpdateRegistry(BOOL)` callback to participate
 in deterministic automatic DLL registration; the callback is not inferred
-from the CLSID. RGS resources, type-library registration, aggregation and
-the full ATL COM Server API remain compatibility gaps.
+from the CLSID. Bounded RGS resources, per-user type-library registration,
+basic aggregation and tear-offs have implemented subsets. Automatic aggregates,
+full RGS/registration semantics and the complete ATL COM Server API remain gaps.
 
 For conventional ATL object declarations, `atlcom.h` supplies the
-[nonaggregated object and COM-map compatibility subset](ATL_COMPATIBILITY.md).
-Its module-aware creator plugs into the same explicit class table. Local
+[object, aggregation, tear-off and COM-map compatibility subsets](ATL_COMPATIBILITY.md).
+Their module-aware creators plug into the same class table. Local
 ATL-style creation retains zero-ref semantics and pins an active application
 CAtlModule if present; DLL classes still use the explicit COM::Module-aware
 creator. The [modern EXE module](ATL_MODULE.md) separately owns its COM startup
@@ -40,7 +41,8 @@ and explicit process-local class registration.
   callback, worker, or an external DLL call. The host must obey COM unload
   rules and retire its own external callers.
 - `GetClassObject` and `CreateInstance` clear valid output pointers before
-  failure. Unknown CLSIDs/IIDs fail explicitly; aggregation is rejected.
+  failure. Unknown CLSIDs/IIDs fail explicitly; aggregation follows the class
+  creator policy, and requires IID_IUnknown when a controlling outer is supplied.
   Derived constructors may throw; creation translates allocation failure to
   `E_OUTOFMEMORY` and other C++ exceptions to `E_UNEXPECTED`.
 - The server never initializes COM, including in `DllMain`. The client owns
@@ -552,7 +554,41 @@ exercise direct factory creation without COM initialization and native
 CoCreateInstance aggregation after installation, then verify real methods,
 canonical identity, reference retirement, DllCanUnloadNow and unload.
 
-This milestone does not implement automatic aggregates, CComPolyObject,
-cached/uncached tear-offs, arbitrary custom factory policies or the whole
+This basic aggregation milestone does not implement automatic aggregates,
+CComPolyObject, arbitrary custom factory policies or the whole
 original COMMap application. It introduces no second factory provider or test
 entry point, and no printer/hardware-HSP CI requirement.
+
+## Ordinary and cached tear-offs
+
+CComTearOffObject implements a separately counted interface object. It retains
+one controlling-owner reference while alive, queries its own map first, uses
+the owner's IUnknown for identity and forwards missing interfaces to the owner.
+Another owner QI creates a new ordinary instance. The owner reference survives
+FinalRelease and the tear-off Base destructor.
+
+CComCachedTearOffObject has a private, separately counted IUnknown. The owner
+keeps one private reference in the declared raw slot (including CComPtr.p),
+while every public contained interface retains the controlling owner. Repeated
+queries reuse the same cached instance; there is no permanent owner/cache
+reference cycle. The owner releases the private IUnknown in FinalRelease.
+
+The existing core suite tests independent instance/cache identities, fallback
+QI, owner retention after the original pointer is released, exact destruction
+ordering, HRESULT/exception/allocation failure and retry, recursive construction
+rejection, eight-thread first-publication and aggregated owner data. The same
+MIDL-generated original ITearOff1/2 interfaces now run through real vtable
+calls in the existing EXE/DLL cases. The unchanged original library omits
+these unreferenced interface descriptions; GetTypeInfo must report
+TYPE_E_ELEMENTNOTFOUND. Both tear-offs additionally implement the original
+IOuter interface, whose actual embedded/registered type information drives
+GetTypeInfo/GetIDsOfNames/Invoke with a short argument and BSTR result.
+A retained cached IOuter is invoked after the DLL owner pointer is released.
+No original Microsoft application is thereby marked qualified.
+
+m_pOwner deliberately stores the actual Owner*; the exact Microsoft
+CComObject<Owner>* member type and layout remain unqualified. See
+ATL_COMPATIBILITY.md for the typed-owner and construction-lock contracts.
+Automatic aggregates, CComPolyObject, full original COMMap admission and
+arbitrary custom factories remain separate work. Hardware HSP and printer
+CI remain retired.

@@ -370,6 +370,206 @@ bool Aggregation() {
     return true;
 }
 
+inline constexpr IID iidOrdinaryTear = {0xf9cb25e1, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+inline constexpr IID iidCachedTear = {0xf9cb25e2, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+inline constexpr CLSID tearOwnerClassId = {0xf9cb25e3, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+struct ITearProbe : IUnknown { virtual HRESULT STDMETHODCALLTYPE Read(LONG*) = 0; };
+class TearOwner;
+std::atomic<int> tearLive[2]{}, tearConstructed[2]{}, tearFinalized[2]{};
+std::atomic<int> tearOwnerLive{0}, tearFailure{0};
+std::atomic<bool> tearOwnerValid{true};
+OpenATL::COM::Module* tearModule = nullptr;
+
+template<bool Cached>
+class CoreTear : public ATL::CComTearOffObjectBase<TearOwner,
+                     std::conditional_t<Cached, ATL::CComMultiThreadModel, ATL::CComSingleThreadModel>>,
+                 public ITearProbe {
+public:
+    CoreTear() {
+        ++tearConstructed[Cached];
+        if (tearFailure == 4) throw std::bad_alloc();
+        ++tearLive[Cached];
+    }
+    ~CoreTear();
+    HRESULT FinalConstruct();
+    void FinalRelease() noexcept { ++tearFinalized[Cached]; }
+    HRESULT STDMETHODCALLTYPE Read(LONG* output) override;
+    BEGIN_COM_MAP(CoreTear)
+        COM_INTERFACE_ENTRY_IID(Cached ? iidCachedTear : iidOrdinaryTear, ITearProbe)
+    END_COM_MAP()
+};
+class TearOwner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IPersist {
+public:
+    ATL::CComPtr<IUnknown> cached;
+    const LONG payload = 41;
+    TearOwner() { ++tearOwnerLive; }
+    ~TearOwner() { --tearOwnerLive; }
+    void FinalRelease() noexcept { cached.Release(); }
+    BEGIN_COM_MAP(TearOwner)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY_TEAR_OFF(iidOrdinaryTear, CoreTear<false>)
+        COM_INTERFACE_ENTRY_CACHED_TEAR_OFF(iidCachedTear, CoreTear<true>, cached.p)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = tearOwnerClassId;
+        return S_OK;
+    }
+};
+template<bool Cached> CoreTear<Cached>::~CoreTear() {
+    if (!this->m_pOwner || this->m_pOwner->payload != 41 || tearOwnerLive == 0 ||
+        (tearModule && tearModule->CanUnloadNow() != S_FALSE)) tearOwnerValid = false;
+    --tearLive[Cached];
+}
+template<bool Cached> HRESULT CoreTear<Cached>::Read(LONG* output) {
+    if (!output) return E_POINTER;
+    if (!this->m_pOwner) return E_UNEXPECTED;
+    *output = this->m_pOwner->payload + (Cached ? 2 : 1);
+    return S_OK;
+}
+template<bool Cached> HRESULT CoreTear<Cached>::FinalConstruct() {
+    if (tearFailure == 1) return E_ACCESSDENIED;
+    if (tearFailure == 2) throw ATL::CAtlException(E_ABORT);
+    if (tearFailure == 3) throw std::runtime_error("tear-off FinalConstruct");
+    if (tearFailure == 5) {
+        void* recursive = reinterpret_cast<void*>(1);
+        HRESULT hr = this->m_pOwner->GetControllingUnknown()->QueryInterface(
+            Cached ? iidCachedTear : iidOrdinaryTear, &recursive);
+        return hr == E_UNEXPECTED && !recursive ? hr : E_FAIL;
+    }
+    return this->m_pOwner && this->m_pOwner->payload == 41 ? S_OK : E_UNEXPECTED;
+}
+
+bool TearOffLifetime() {
+    const OpenATL::COM::ClassEntry entry{tearOwnerClassId,
+        &ATL::CComObject<TearOwner>::CreateInstance};
+    OpenATL::COM::Module module(&entry, 1);
+    tearModule = &module;
+    ATL::CComPtr<IClassFactory> factory;
+    CHECK(module.GetClassObject(tearOwnerClassId, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK);
+    ATL::CComPtr<IPersist> owner;
+    CHECK(factory->CreateInstance(nullptr, IID_IPersist, reinterpret_cast<void**>(&owner.p)) == S_OK);
+    factory.Release();
+    auto* data = static_cast<TearOwner*>(owner.p);
+    CHECK(!data->cached.p && tearLive[0] == 0 && tearLive[1] == 0);
+    ATL::CComPtr<ITearProbe> a, b, c, d;
+    CHECK(owner->QueryInterface(iidOrdinaryTear, reinterpret_cast<void**>(&a.p)) == S_OK);
+    CHECK(owner->QueryInterface(iidOrdinaryTear, reinterpret_cast<void**>(&b.p)) == S_OK && a.p != b.p);
+    CHECK(owner->QueryInterface(iidCachedTear, reinterpret_cast<void**>(&c.p)) == S_OK);
+    CHECK(owner->QueryInterface(iidCachedTear, reinterpret_cast<void**>(&d.p)) == S_OK && c.p == d.p);
+    CHECK(tearLive[0] == 2 && tearLive[1] == 1 && data->cached.p);
+    ATL::CComPtr<IUnknown> canonical;
+    CHECK(owner->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK);
+    for (ITearProbe* item : {a.p, b.p, c.p, d.p}) {
+        ATL::CComPtr<IUnknown> identity;
+        CHECK(item->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == canonical.p);
+        void* missing = reinterpret_cast<void*>(1);
+        CHECK(item->QueryInterface(IID_IStream, &missing) == E_NOINTERFACE && !missing);
+        CHECK(item->QueryInterface(IID_IUnknown, nullptr) == E_POINTER);
+    }
+    ATL::CComPtr<ITearProbe> cross;
+    CHECK(a->QueryInterface(iidCachedTear, reinterpret_cast<void**>(&cross.p)) == S_OK && cross.p == c.p);
+    cross.Release();
+    ATL::CComPtr<IPersist> parent;
+    CHECK(c->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&parent.p)) == S_OK && parent.p == owner.p);
+    parent.Release();
+    ATL::CComPtr<IUnknown> privateCache;
+    CHECK(data->cached->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&privateCache.p)) == S_OK &&
+          privateCache.p == data->cached.p && privateCache.p != canonical.p);
+    privateCache.Release();
+    canonical.Release(); owner.Release();
+    CHECK(tearOwnerLive == 1 && module.CanUnloadNow() == S_FALSE);
+    LONG value = 0;
+    CHECK(a->Read(&value) == S_OK && value == 42 && c->Read(&value) == S_OK && value == 43);
+    c.Release(); d.Release();
+    CHECK(tearLive[1] == 1); // Cache survives external tear-interface release.
+    a.Release();
+    CHECK(tearOwnerLive == 1 && tearLive[0] == 1);
+    b.Release();
+    CHECK(tearOwnerLive == 0 && tearLive[0] == 0 && tearLive[1] == 0 && tearOwnerValid);
+    CHECK(module.CanUnloadNow() == S_OK);
+    tearModule = nullptr;
+    return true;
+}
+
+bool TearOffFailuresAndThreads() {
+    ATL::CComObject<TearOwner>* owner = nullptr;
+    CHECK(ATL::CComObject<TearOwner>::CreateInstance(&owner) == S_OK && owner->AddRef() == 1);
+    const HRESULT failures[] = {S_OK, E_ACCESSDENIED, E_ABORT, E_UNEXPECTED, E_OUTOFMEMORY, E_UNEXPECTED};
+    for (bool cached : {false, true}) {
+        for (int mode = 1; mode <= 5; ++mode) {
+            tearFailure = mode;
+            const int finalized = tearFinalized[cached];
+            void* output = reinterpret_cast<void*>(1);
+            CHECK(owner->QueryInterface(cached ? iidCachedTear : iidOrdinaryTear, &output) == failures[mode] && !output);
+            CHECK(!owner->cached.p && tearLive[0] == 0 && tearLive[1] == 0);
+            CHECK(tearFinalized[cached] == finalized + (mode == 4 ? 0 : 1));
+            CHECK(owner->AddRef() == 2 && owner->Release() == 1);
+            tearFailure = 0;
+            ATL::CComPtr<ITearProbe> retry;
+            CHECK(owner->QueryInterface(cached ? iidCachedTear : iidOrdinaryTear,
+                reinterpret_cast<void**>(&retry.p)) == S_OK);
+            retry.Release();
+            owner->cached.Release(); // Caller retains owner; no concurrent cache users.
+        }
+    }
+    void* missing = reinterpret_cast<void*>(1);
+    CHECK((ATL::CComCreator<ATL::CComTearOffObject<CoreTear<false>>>::CreateInstance(
+        owner, IID_IStream, &missing)) == E_NOINTERFACE && !missing);
+    CHECK((ATL::CComCreator<ATL::CComTearOffObject<CoreTear<false>>>::CreateInstance(
+        nullptr, iidOrdinaryTear, &missing)) == E_INVALIDARG && !missing);
+    CHECK((ATL::CComCreator<ATL::CComCachedTearOffObject<CoreTear<true>>>::CreateInstance(
+        owner, iidCachedTear, &missing)) == E_NOINTERFACE && !missing);
+    ATL::CComPtr<IUnknown> rawCache;
+    CHECK((ATL::CComCreator<ATL::CComCachedTearOffObject<CoreTear<true>>>::CreateInstance(
+        owner, IID_IUnknown, reinterpret_cast<void**>(&rawCache.p))) == S_OK);
+    ATL::CComPtr<ITearProbe> rawData;
+    CHECK(rawCache->QueryInterface(iidCachedTear, reinterpret_cast<void**>(&rawData.p)) == S_OK);
+    rawData.Release(); rawCache.Release();
+    const int constructed = tearConstructed[1];
+    std::atomic<void*> selected{nullptr};
+    std::atomic<bool> good{true};
+    std::vector<std::thread> callers;
+    for (int n = 0; n < 8; ++n) callers.emplace_back([&] {
+        for (int i = 0; i < 100; ++i) {
+            ITearProbe* result = nullptr;
+            if (owner->QueryInterface(iidCachedTear, reinterpret_cast<void**>(&result)) != S_OK || !result) {
+                good = false; continue;
+            }
+            void* expected = nullptr;
+            if (!selected.compare_exchange_strong(expected, result) && expected != result) good = false;
+            LONG value = 0;
+            if (result->Read(&value) != S_OK || value != 43) good = false;
+            result->Release();
+        }
+    });
+    for (auto& caller : callers) caller.join();
+    CHECK(good && tearConstructed[1] == constructed + 1 && tearLive[1] == 1);
+    CHECK(owner->Release() == 0 && tearOwnerLive == 0 && tearLive[0] == 0 && tearLive[1] == 0 && tearOwnerValid);
+    // Owner data is a real contained subobject when aggregation is used,
+    // while canonical identity remains the outside controlling IUnknown.
+    AggregateOuter outer;
+    ATL::CComAggObject<TearOwner>* inner = nullptr;
+    CHECK(ATL::CComAggObject<TearOwner>::CreateInstance(&outer, &inner) == S_OK && inner->AddRef() == 1);
+    outer.inner.Attach(inner);
+    for (const IID* iid : {&iidOrdinaryTear, &iidCachedTear}) {
+        ATL::CComPtr<ITearProbe> result;
+        CHECK(outer.QueryInterface(*iid, reinterpret_cast<void**>(&result.p)) == S_OK);
+        LONG value = 0;
+        CHECK(result->Read(&value) == S_OK && value == (iid == &iidOrdinaryTear ? 42 : 43));
+        ATL::CComPtr<IUnknown> identity;
+        CHECK(result->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == &outer);
+    }
+    CHECK(outer.refs == 1);
+    outer.inner.Release();
+    CHECK(tearOwnerLive == 0 && tearLive[0] == 0 && tearLive[1] == 0 && tearOwnerValid);
+    return true;
+}
+
 class Single : public ATL::CComObjectRootEx<ATL::CComSingleThreadModel>, public IPersist {
 public:
     BEGIN_COM_MAP(Single)
@@ -385,6 +585,8 @@ public:
 bool RunAtlCompatibilityTests() {
     CHECK(ComMapChain());
     CHECK(Aggregation());
+    CHECK(TearOffLifetime());
+    CHECK(TearOffFailuresAndThreads());
     using Object = ATL::CComObject<Compatible>;
     CHECK(Object::CreateInstance(static_cast<Object**>(nullptr)) == E_POINTER);
     Object* object = nullptr;

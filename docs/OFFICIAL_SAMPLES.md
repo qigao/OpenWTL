@@ -163,8 +163,7 @@ qualification.
 This qualifies original **IDL generation, embedded/registered TypeLib loading and one
 real Automation property**, not original COMMap project compilation/link or
 original COMMap class activation.
-The unchanged COMMap still needs cached tear-offs, automatic
-aggregation, full registration/API compatibility, broader `IDispatchImpl` and
+The unchanged COMMap still needs automatic aggregation, full registration/API compatibility, broader `IDispatchImpl` and
 generated `aggreg/aggreg.idl`. All 37 original pure-ATL project
 entries remain **not-qualified**.
 
@@ -189,12 +188,12 @@ OpenATL build/runtime tests:
 
 | Sample | Observed dependencies still missing in OpenATL |
 | --- | --- |
-| COMMap | Aggregation, cached tear-offs, automatic aggregation, complete registrar APIs and generated `aggreg/aggreg.idl`; existing module/dispatch/map subsets do not qualify the whole project |
+| COMMap | Automatic aggregation, exact tear-off member/layout contracts, complete registrar APIs and generated `aggreg/aggreg.idl`; implemented aggregation/tear-off/module/dispatch/map subsets do not qualify the whole project |
 | ATLCollections | `ICollectionOnSTLImpl`, `CComEnumOnSTL`, complete registrar APIs and generated/imported type-library integration |
 | ATLSafeArray | `atlsafe.h` / `CComSafeArray`, complete control/server support and whole-project generated TypeLib integration |
 
 Adding `atlcom.h` alone does not implement these contracts. The implemented
-nonaggregated object/map subset remains covered by OpenATL's native tests;
+object/map, basic aggregation and tear-off subsets remain covered by OpenATL's native tests;
 see [ATL compatibility](ATL_COMPATIBILITY.md). `CComModule` has a legacy
 object-map/lifetime subset. Numeric/named module resource helpers and bounded
 replacement maps use the static registrar; dynamic registrar APIs and full
@@ -207,3 +206,13 @@ Sources:
 - [Official WTL release](https://sourceforge.net/projects/wtl/files/WTL%2010/WTL%2010.0.10320%20Release/)
 - [Microsoft sample catalog](https://learn.microsoft.com/en-us/cpp/overview/visual-cpp-samples)
 - [Pinned Microsoft ATL sample sources](https://github.com/microsoft/VCSamples/tree/9e1d4475555b76a17a3568369867f1d7b6cc6126/VC2010Samples/ATL/General)
+
+The original MIDL ITearOff1/ITearOff2 declarations additionally drive ordinary
+and cached tear-off vtable/identity/lifetime tests. Their descriptions are
+absent from the unchanged library because neither original coclass references
+them; GetTypeInfo must fail TYPE_E_ELEMENTNOTFOUND. Each tear-off also implements
+the original IOuter interface, whose real embedded/registered type information
+drives native Invoke and a retained cached interface after DLL owner release.
+This qualifies the mapped API subset, not the unchanged Outer.cpp/Chain.cpp or
+the whole COMMap DLL. Exact Microsoft tear-off member pointer/layout compatibility
+and automatic aggregates remain separate.

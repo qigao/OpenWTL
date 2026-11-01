@@ -36,7 +36,9 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `CComCoClass<T, &CLSID>`, `CComCreator<Object>`, `CComCreator2` | Default aggregatable creator selection, CLSID accessor, owned local creation and class-declared nonaggregated/aggregate-only policies. Explicit CComCreator<CComObject<T>> remains nonaggregated. |
 | `CComContainedObject<T>`, `CComAggObject<T>` | Delegating contained interfaces and separate nondelegating inner IUnknown, zero-ref raw creation, construction failure cleanup and module pins through contained destruction. The outer identity is borrowed, not retained cyclically. |
 | `DECLARE_AGGREGATABLE`, `DECLARE_NOT_AGGREGATABLE`, `DECLARE_ONLY_AGGREGATABLE` | Built-in creator policies honored by direct CComCoClass creation and OBJECT_ENTRY_AUTO factories; aggregate factory creation requires IID_IUnknown. Custom factory policies and CComPolyObject remain unqualified. |
-| `COM_INTERFACE_ENTRY_AGGREGATE`, `COM_INTERFACE_ENTRY_AGGREGATE_BLIND` | Delegate to an explicitly owned inner IUnknown, preserve the outer canonical identity and one owning QI reference, including through chained maps. Automatic aggregate creation and tear-offs remain pending. |
+| `COM_INTERFACE_ENTRY_AGGREGATE`, `COM_INTERFACE_ENTRY_AGGREGATE_BLIND` | Delegate to an explicitly owned inner IUnknown, preserve the outer canonical identity and one owning QI reference, including through chained maps. Automatic aggregate creation remains pending. |
+| `CComTearOffObjectBase`, `CComTearOffObject`, `CComCachedTearOffObject` | Ordinary tear-offs retain the owner until their own last release; cached private IUnknown is owner-held and public interfaces retain the controlling owner. Supports ordinary and aggregated owner subobjects without layout casts. See the typed-owner limitation below. |
+| `COM_INTERFACE_ENTRY_TEAR_OFF`, `COM_INTERFACE_ENTRY_CACHED_TEAR_OFF` | Lazy ordinary instances and serialized cached publication, one QI reference and canonical owner identity, construction failures/retry and same-entry reentrancy rejection. Cached slots must be released by the owner's FinalRelease. |
 | `DECLARE_GET_CONTROLLING_UNKNOWN`, `OuterQueryInterface` / `OuterAddRef` / `OuterRelease` | Explicit outer identity access/delegation; no automatic COM initialization. |
 | `BEGIN_COM_MAP` / `END_COM_MAP` | First simple entry supplies canonical IUnknown; typed pointer adjustments |
 | `COM_INTERFACE_ENTRY`, `COM_INTERFACE_ENTRY_IID` | Interface type or explicit IID mapping |
@@ -113,8 +115,8 @@ IChain implementation uses standard 0xffff/0xffff dispatch for real property
 Invoke in STA/MTA. This is original-IDL and embedded-dispatch admission, not
 the whole original COMMap DLL build/link or any of the 37 pure-ATL projects passing.
 
-**Tracked compatibility gaps:** automatic aggregate creation, cached/uncached
-tear-offs, CComPolyObject and custom factory policies,
+**Tracked compatibility gaps:** automatic aggregate creation,
+CComPolyObject, exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
 connection-point server templates, SAFEARRAY wrappers, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
@@ -141,3 +143,23 @@ Public behavior references:
 - [CComObject](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomobject-class)
 - [CComObjectRootEx](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomobjectrootex-class)
 - [COM map entries](https://learn.microsoft.com/en-us/cpp/atl/reference/com-interface-entry-macros)
+
+## Tear-off source-contract boundary
+
+CComTearOffObjectBase exposes m_pOwner as the actual typed Owner* subobject,
+where Microsoft documents CComObject<Owner>*. This preserves owner-member
+access and works safely for both CComObject and CComContainedObject owners;
+it does not fabricate a CComObject pointer for an aggregated owner. Code that
+requires the exact Microsoft member pointer type or object layout is not
+qualified. The opaque void* constructors/creator helpers expect an actual
+CComObject<Owner>*; map entries use explicit typed owner/control arguments
+and do not depend on that cast.
+
+Cached initialization uses the owner's existing Lock/Unlock policy. The
+owner must remain externally referenced, SingleThreadModel access must stay
+serialized, and user construction hooks must not wait for another thread
+whose QI is blocked on the same owner lock. Same-thread construction cycles
+fail E_UNEXPECTED before a second allocation (maximum nested construction
+depth 64); failures leave a null cache so later requests can retry. Owners
+release the private cached IUnknown during FinalRelease after external calls
+retire. Concurrent manual replacement of the cache slot is not supported.

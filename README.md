@@ -117,7 +117,7 @@ operations are explicit. Optional `CImage` BMP/PNG codec callers link
 Windows `gdiplus` themselves; it is not a transitive UI dependency.
 
 Full ATL compatibility, complete Automation/type-library support,
-automatic aggregates/tear-offs, windowless ActiveX and some original WTL native behaviors
+automatic aggregates, exact tear-off pointer/layout compatibility, windowless ActiveX and some original WTL native behaviors
 remain open. API-level limits belong to the linked contracts; downstream
 applications still need acceptance for their own behavior and lifetimes.
 
