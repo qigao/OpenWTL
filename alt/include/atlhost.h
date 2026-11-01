@@ -646,7 +646,9 @@ struct AxDialogCreation {
         if (message == WM_INITDIALOG && !creation->BeginInitialization()) return FALSE;
         if (creation->retired || !::IsWindow(target)) return FALSE;
         const auto application = reinterpret_cast<DLGPROC>(::GetWindowLongPtrW(target, DWLP_DLGPROC));
-        return application && application != DialogProc ? application(target, message, w, l) : FALSE;
+        // DWLP_DLGPROC can be an opaque handle; invoke it through User32.
+        return application && application != DialogProc ?
+            ::CallWindowProcW(reinterpret_cast<WNDPROC>(application), target, message, w, l) : FALSE;
     }
 };
 template<class T, class = void> struct HasAxSinkMap : std::false_type {};

@@ -401,6 +401,7 @@ public:
 };
 bool ownerDrawDialogs() {
     for (int resource : {649, 650, 651}) for (bool modal : {false, true}) {
+        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw resource=%d modal=%d\n", resource, static_cast<int>(modal));
         OwnerDrawState state; state.resource = resource; state.modal = modal;
         state.nested = true; state.recursiveInit = resource == 651;
         OwnerDrawDialog dialog(state);
@@ -415,6 +416,7 @@ bool ownerDrawDialogs() {
         CHECK(!ATL::detail::AxDialogCreation::Current());
     }
     for (bool modal : {false, true}) {
+        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-cancel modal=%d\n", static_cast<int>(modal));
         OwnerDrawState state; state.modal = modal; state.cancel = true;
         OwnerDrawDialog dialog(state);
         if (modal) CHECK(dialog.DoModal(nullptr, 1773) == -1);
@@ -484,6 +486,7 @@ bool plainDialogs() {
     CHECK((new DeletingDialog(modal, true))->DoModal(nullptr) == 91);
     CHECK(modal.initialized == 1 && modal.finalized == 1 && modal.destroyed == 1);
     for (WORD id : {WORD(637), WORD(638)}) {
+        std::fprintf(stderr, "ACTIVEX_PHASE plain-strings resource=%u\n", static_cast<unsigned>(id));
         PlainDialog strings; strings.resource = id;
         CHECK(strings.Create(nullptr, 1773) && strings.good && strings.parameter == 1773 && strings.initialized == 1);
         CHECK(strings.DestroyWindow() && strings.finalized == 1);
@@ -846,7 +849,10 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    std::fprintf(stderr, "ACTIVEX_PHASE resource-validation\n");
+    if (!dialogTemplates()) return 1;
+    std::fprintf(stderr, "ACTIVEX_PHASE plain-dialogs\n");
+    if (!plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
