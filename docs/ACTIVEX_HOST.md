@@ -51,6 +51,10 @@ back, and failed explicit Unadvise retains the binding for retry. The existing
 WebBrowser admission uses the native DocumentComplete TypeLib description.
 AtlGetObjectSourceInterface shares this discovery and returns the actual library
 identity, version and default outgoing IID, with cleared outputs on failure.
+IDispEventSimpleImpl uses the same discovery for Advise and null-IID
+DispEventAdvise. Explicit-IID DispEventAdvise needs no source metadata, and
+SINK_ENTRY_INFO continues to describe invocation. Successful Unadvise restores
+the initial sink identity; failed explicit Unadvise keeps the binding for retry.
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
 

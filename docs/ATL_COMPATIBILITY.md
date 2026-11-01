@@ -444,8 +444,16 @@ defaults and malformed type kinds fail rather than select an arbitrary source.
 AtlGetObjectSourceInterface exposes this shared discovery and returns the actual
 library GUID, outgoing IID and library version. It clears every supplied output
 on entry and publishes metadata only after complete success. These fallbacks
-apply to IDispEventImpl and this helper; the manually described
-IDispEventSimpleImpl retains its narrower IProvideClassInfo2 default-IID path.
+apply to both IDispEventImpl and IDispEventSimpleImpl through this shared helper.
+For the simple sink, Advise discovers the default outgoing IID even when the
+template declares a different IID. DispEventAdvise uses its explicit/template
+IID without requiring source type information; a null pointer or IID_NULL
+requests discovery. Its invocation still uses SINK_ENTRY_INFO metadata, and its
+GetTypeInfo/GetTypeInfoCount/GetIDsOfNames remain E_NOTIMPL. Successful simple
+sink Unadvise restores the initial template IID and clears the cookie; failed
+discovery/subscription restores the previous identity, while failed explicit
+Unadvise preserves the active identity/cookie for retry. Unadvise disconnects
+the stored default binding rather than rediscovering mutable source metadata.
 Unavailable metadata returns its actual error, without implicit registration
 or a registry/image fallback. There is no static owned ITypeInfo cache.
 
@@ -487,7 +495,12 @@ native metadata. Registered AuxValue activation exercises the IDispatch/IPersist
 path without a class-info provider. Both expose a native described incoming
 property and verify default event delivery and disconnection. Core cases cover
 missing defaults, malformed coclass metadata, absent IPersist, metadata/class-ID
-failures, cleared outputs, failed subscriptions and successful retry. The existing WebBrowser case
+failures, cleared outputs, failed subscriptions and successful retry. Simple
+sinks exercise the same native sources, including synchronous callbacks during
+Advise, wrong-source/failed Unadvise, identity reset, explicit metadata-free
+subscriptions and destructor cleanup. Existing Value/AuxValue DLL event cases
+also bind manually described sinks through both discovery fallback paths.
+The existing WebBrowser case
 uses IDispEventImpl for real DocumentComplete events. No target/test mode/export/
 workflow is added; all 36 pinned Microsoft blobs remain unchanged.
 
@@ -496,6 +509,7 @@ exact member layouts and whole original event proxy/project admission remain
 open. This bounded sink implementation is not complete ActiveX control support.
 
 References: [IDispEventImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/idispeventimpl-class),
+[IDispEventSimpleImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/idispeventsimpleimpl-class),
 [source-discovery helper](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [IProvideClassInfo](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nn-ocidl-iprovideclassinfo),
 [IPersist](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nn-objidl-ipersist),
