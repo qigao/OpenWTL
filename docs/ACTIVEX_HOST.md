@@ -68,8 +68,13 @@ dialog thunk/dispatcher. Explicit close failures preserve the window for retry.
 Standard/extended resources may also name a literal CLSID as a control class:
 validated empty placeholders are converted into the existing AxWin host with
 the CLSID as its creation text. Ordinary controls and original resource bytes
-are preserved. DLGINIT persistence/license records and nonempty placeholder
-initialization remain unsupported; they fail rather than being skipped. See
+are preserved. Bounded DLGINIT 0x0376 records supply counted license keys and
+persisted bytes to the existing native factory/stream initialization. Loading
+finishes before application WM_INITDIALOG and automatic sink subscriptions;
+failed or reentrant retirement destroys the partial dialog. Storage, binding,
+INITNEW, ordinary list/combo messages and nonempty inline placeholder data still
+fail explicitly. This path creates all native children before loading controls
+and does not forward early application dialog callbacks. See
 [control-dialog scope](ATL_COMPATIBILITY.md#control-hosting-dialogs).
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.

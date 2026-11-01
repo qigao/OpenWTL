@@ -14,6 +14,8 @@ struct ControlState {
     CLSID classId{};
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
     bool siteOrder = true, licenseSeen = false;
+    bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
+    ULONG streamBytes = 4;
     HWND window = nullptr;
     int initialized = 0, loaded = 0, activated = 0, detached = 0, closed = 0, destroyed = 0;
 };
@@ -33,6 +35,13 @@ public:
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
     HRESULT STDMETHODCALLTYPE SetClientSite(IOleClientSite* site) override {
         if (!site && site_) ++state_.detached;
+        if (site && state_.discoverWindow) {
+            ATL::CComPtr<IOleWindow> window;
+            HRESULT hr = site->QueryInterface(IID_IOleWindow, reinterpret_cast<void**>(&window));
+            if (FAILED(hr)) return hr;
+            hr = window->GetWindow(&state_.window);
+            if (FAILED(hr)) return hr;
+        }
         site_ = site; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetClientSite(IOleClientSite** site) override { return site_.CopyTo(site); }
@@ -63,6 +72,15 @@ public:
     HRESULT STDMETHODCALLTYPE Load(IStream* stream) override {
         ULONG read = 0; DWORD marker = 0;
         if (!stream || stream->Read(&marker, sizeof(marker), &read) != S_OK || read != sizeof(marker) || marker != 42) return E_FAIL;
+        STATSTG stat{};
+        if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK || stat.cbSize.QuadPart != state_.streamBytes) return E_FAIL;
+        if (state_.streamBytes == 5) {
+            BYTE tail = 0;
+            if (stream->Read(&tail, 1, &read) != S_OK || read != 1 || tail != 0xA5) return E_FAIL;
+        }
+        BYTE end = 0;
+        // Native HGLOBAL streams return S_OK with zero bytes at EOF.
+        if (FAILED(stream->Read(&end, 1, &read)) || read) return E_FAIL;
         ++state_.loaded; return Initialize();
     }
     HRESULT STDMETHODCALLTYPE Save(IStream*, BOOL) override { return E_NOTIMPL; }
@@ -77,6 +95,8 @@ private:
     HRESULT Initialize() {
         state_.siteOrder = state_.siteOrder && (static_cast<bool>(site_.p) == state_.siteFirst);
         if (state_.destroyDuringInit) ::DestroyWindow(state_.window);
+        if (state_.destroyDialogDuringInit) ::DestroyWindow(::GetParent(state_.window));
+        if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder ? E_FAIL : S_OK;
     }
     ~Control() { ++state_.destroyed; }
@@ -109,7 +129,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE CreateInstanceLic(IUnknown* outer, IUnknown*, REFIID iid, BSTR key, void** value) override {
         if (!value) return E_POINTER; *value = nullptr;
-        if (!key || ::wcscmp(key, L"OpenATL-test-license")) return CLASS_E_NOTLICENSED;
+        if (!key || ::SysStringLen(key) != 20 || std::memcmp(key, L"OpenATL-test-license", 20 * sizeof(WCHAR))) return CLASS_E_NOTLICENSED;
         state_.licenseSeen = true; return CreateInstance(outer, iid, value);
     }
 private:
@@ -160,6 +180,84 @@ bool creation() {
         if (::IsWindow(window)) REQUIRE(window.DestroyWindow());
         window.m_hWnd = nullptr;
         REQUIRE(state.destroyed == 1);
+    }
+    return true;
+}
+class ResourceDialog : public ATL::CAxDialogImpl<ResourceDialog> {
+public:
+    enum { IDD = 610 };
+    WORD resource = IDD;
+    ControlState& state;
+    bool modal = false, closeInInit = false, good = true;
+    int initialized = 0, finalized = 0;
+    explicit ResourceDialog(ControlState& value) : state(value) {}
+    int GetIDD() const { return resource; }
+    LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
+        ++initialized;
+        ATL::CComPtr<IOleObject> control;
+        good = parameter == 1773 && state.loaded == 1 && state.initialized == 0 && state.activated == 1 &&
+            GetDlgControl(711, IID_IOleObject, reinterpret_cast<void**>(&control)) == S_OK && ::GetDlgItem(m_hWnd, 714);
+        WCHAR hostClass[32]{};
+        good = ::GetClassNameW(::GetDlgItem(m_hWnd, 711), hostClass, 32) &&
+            !::wcscmp(hostClass, resource == 611 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
+        if (modal) good = EndDialog(93) && good;
+        else if (closeInInit) good = DestroyWindow() && good;
+        return TRUE;
+    }
+    void OnFinalMessage(HWND) override { ++finalized; }
+    BEGIN_MSG_MAP(ResourceDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+bool resourceInitialization() {
+    ControlState state;
+    CLSID classId{};
+    REQUIRE(::CLSIDFromString(L"{2D71A87E-15C3-491D-9F8B-8319472CEA04}", &classId) == S_OK);
+    ATL::CComPtr<IClassFactory2> factory; factory.Attach(new Factory(state));
+    Registration registration;
+    REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
+    ATL::CAtlModule module;
+    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619)}) for (int mode = 0; mode < 5; ++mode) {
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        state.siteFirst = mode != 1; state.initInterface = mode != 2;
+        state.sendInitDuringLoad = mode == 4;
+        state.streamBytes = resource == 619 ? 5 : 4;
+        ResourceDialog dialog(state); dialog.resource = resource; dialog.modal = mode == 3;
+        if (dialog.modal) REQUIRE(dialog.DoModal(nullptr, 1773) == 93);
+        else {
+            REQUIRE(dialog.Create(nullptr, 1773));
+            REQUIRE(module.GetLockCount() == 1);
+            REQUIRE(dialog.DestroyWindow());
+        }
+        REQUIRE(dialog.good && dialog.initialized == 1 && dialog.finalized == 1 && !dialog.m_hWnd);
+        REQUIRE(state.siteOrder && state.loaded == 1 && !state.initialized && state.activated == 1);
+        REQUIRE(state.licenseSeen == (resource == 612 || resource == 619));
+        REQUIRE(state.detached == 1 && state.closed == 1 && state.destroyed == 1 && module.GetLockCount() == 0);
+    }
+    // Failure must finish before application initialization, clean all earlier
+    // children and leave the C++ owner reusable without pending creation data.
+    for (int mode = 0; mode < 7; ++mode) for (bool modal : {false, true}) {
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        state.failInit = mode == 2;
+        state.destroyDuringInit = mode == 3;
+        state.destroyDialogDuringInit = mode == 4;
+        ResourceDialog dialog(state); dialog.modal = modal;
+        dialog.resource = mode == 0 ? 613 : mode == 1 ? 614 : 610;
+        dialog.closeInInit = mode == 5;
+        if (mode == 6) state.initInterface = false; // Stream fallback failure, not InitNew.
+        if (mode == 6) state.failInit = true;
+        if (mode == 5 && modal) {
+            REQUIRE(dialog.DoModal(nullptr, 1773) == 93);
+        } else if (modal) REQUIRE(dialog.DoModal(nullptr, 1773) == -1);
+        else REQUIRE(!dialog.Create(nullptr, 1773));
+        REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0);
+        REQUIRE(dialog.initialized == (mode == 5 ? 1 : 0));
+        REQUIRE(dialog.finalized == (mode == 5 ? 1 : 0));
+        REQUIRE(state.destroyed == (mode == 0 ? 0 : mode == 1 ? 2 : 1));
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        dialog.resource = 610; dialog.modal = false; dialog.closeInInit = false;
+        REQUIRE(dialog.Create(nullptr, 1773) && dialog.good);
+        REQUIRE(dialog.DestroyWindow() && module.GetLockCount() == 0);
     }
     return true;
 }
@@ -224,5 +322,6 @@ bool accelerators() {
 bool RunHostLifecycleTests() {
     const bool created = creation();
     const bool active = accelerators();
-    return created && active;
+    const bool resources = resourceInitialization();
+    return created && active && resources;
 }
