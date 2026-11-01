@@ -21,6 +21,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlsafe.h`: `CComSafeArray<T, VARTYPE>`, `CComSafeArrayBound` | Native OLEAUT32 array creation, deep copy, attach/detach, checked borrowed element access, copied/transferred resource elements, append, multidimensional access and resize. Explicit destruction preserves ownership on native failure. See SAFEARRAY scope below. |
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
+| `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
 | `atlbase.h`: `CAtlDllModuleT<T>` | Real DLL exports and one `OpenATL::COM::Module` engine. Supports bound tables and static `OBJECT_ENTRY_AUTO` discovery, plus class-directed `UpdateRegistry(BOOL)` callbacks with ordered rollback. Supplies a lazy RGS context using one captured per-user mode, with explicit context overrides. TypeLib=TRUE preloads the own-image TypeLib, registers it through OLEAUT32 after classes, and rolls class callbacks back if TypeLib registration fails. Automatic ProgID inference remains pending. |
 | `OBJECT_ENTRY_AUTO(clsid, type)` | Static per-image class map, built-in class-declared creator policy and optional typed `UpdateRegistry(BOOL)` callback, bounded duplicate/invalid CLSID rejection, real `IClassFactory`/object/module-lock ownership and native STA/MTA activation. No COM, registry I/O or heap allocation in static constructor. |
@@ -123,7 +124,7 @@ the whole original COMMap DLL build/link or any of the 37 pure-ATL projects pass
 
 **Tracked compatibility gaps:** exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
-connection-point server templates, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
+TypeLib-driven event sinks/property-notification helpers, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
 `CComModule` has an implemented legacy object-map subset; its presence is
 not a claim that complete legacy ATL applications already pass. Windowed containment and typed simple
@@ -317,3 +318,57 @@ internal-wrapper contracts remain separate.
 References: [CComSafeArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomsafearray-class),
 [CComSafeArrayBound](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomsafearraybound-class),
 [IObjectSafetyImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/iobjectsafetyimpl-class).
+
+## Server connection points
+
+IConnectionPointImpl<T, &iid, CDV> and IConnectionPointContainerImpl<T> expose
+native IConnectionPoint/IConnectionPointContainer interfaces through standard
+BEGIN_CONNECTION_POINT_MAP, CONNECTION_POINT_ENTRY, CONNECTION_POINT_ENTRY_P
+and END_CONNECTION_POINT_MAP declarations. An embedded point face has its own
+IUnknown identity and delegates lifetime to its actual ordinary/contained owner.
+GetConnectionPointContainer uses real owner QI, including aggregation's outer.
+FindConnectionPoint returns stable adjusted point interfaces by outgoing IID.
+
+Advise queries the exact outgoing interface and owns that reference until
+Unadvise or owner destruction. Failed Advise clears the cookie; missing sink
+interfaces, fixed-capacity limits and invalid disconnects return actual errors.
+Owner Lock/Unlock serializes connection changes. Sink QI and the final Release
+of a disconnected sink occur outside that lock. Standard STDMETHOD overrides
+of point methods are dispatched through the native face; thrown ATL/allocation/
+unexpected exceptions from throwing C++ overrides become HRESULT failures at
+that COM boundary. Standard STDMETHOD overrides must honor the SDK's nothrow
+annotations and return failures as HRESULTs. The public m_vec supports
+generated-proxy-style indexed/range access; callers must use the owner's lock
+and retain interfaces before invoking them outside the lock. Firing policy is
+the proxy/application's responsibility; these templates do not invent events.
+
+CComDynamicUnkArray and CComUnkArray<N> store borrowed outgoing pointers, with
+nonzero 32-bit slot cookies independent of pointer width. Removing a slot keeps
+other live cookies stable; vacant slots may be reused. GetSize reports allocated
+slots, including holes. Array methods do not AddRef/Release; connection points
+manage those references. GetCookie accepts a slot address, or finds the first
+matching value for a separately supplied pointer. Do not independently mutate
+an owning point's m_vec behind its connection-management methods.
+
+Both native enumerators own immutable snapshots with independent Next/Skip/
+Reset/Clone cursors. Each returned pointer carries a caller-owned reference.
+Snapshots retain sinks/points and the originating owner/image even after
+Unadvise and client release. Native core tests cover maps, duplicate sinks,
+capacity/failure cleanup, interface pointer adjustment, partial enumeration,
+clones, callback/release reentrancy, typed sink interoperation and concurrent
+direct free-threaded C++ use without COM initialization. Existing registered
+Value DLL STA/MTA and aggregated cases exercise actual outgoing vtable calls;
+snapshot/clone retirement gates DllCanUnloadNow on the existing module path.
+
+The implementation uses typed embedded faces rather than Microsoft's internal
+layout. Internal locator/map metadata, exact inheritance/binary layouts,
+TypeLib-driven IDispEventImpl, IPropertyNotifySinkCP/CFirePropNotifyEvent,
+cross-apartment marshaling of custom interfaces and unchanged original event
+proxy/full-project admission remain unqualified. No target, test mode, export
+or workflow is added. All 36 pinned original Microsoft blobs remain unchanged.
+
+References: [IConnectionPointImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/iconnectionpointimpl-class),
+[IConnectionPointContainerImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/iconnectionpointcontainerimpl-class),
+[connection-point macros](https://learn.microsoft.com/en-us/cpp/atl/reference/connection-point-macros),
+[CComDynamicUnkArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomdynamicunkarray-class),
+[CComUnkArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomunkarray-class).

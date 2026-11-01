@@ -16,7 +16,9 @@ HRESULT registerFixture(BOOL installing) noexcept;
 class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public ATL::CComCoClass<Value, &CLSID_OpenATLValue>,
               public IOpenATLDerived, public IOpenATLSecond,
-              public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue> {
+              public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue>,
+              public ATL::IConnectionPointContainerImpl<Value>,
+              public ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents> {
 public:
     DECLARE_POLY_AGGREGATABLE(Value)
     BEGIN_COM_MAP(Value)
@@ -24,11 +26,27 @@ public:
         COM_INTERFACE_ENTRY2_IID(IID_OpenATLValue, IOpenATLValue, IOpenATLDerived)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLSecond, IOpenATLSecond)
         COM_INTERFACE_ENTRY(ISupportErrorInfo)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
     END_COM_MAP()
+    BEGIN_CONNECTION_POINT_MAP(Value)
+        CONNECTION_POINT_ENTRY(IID_OpenATLValueEvents)
+    END_CONNECTION_POINT_MAP()
     DECLARE_REGISTRY_RESOURCEID(IDR_OPENATL_VALUE)
     HRESULT STDMETHODCALLTYPE GetValue(LONG* value) noexcept override {
         if (!value) return Error(UINT(IDS_OPENATL_ERROR), 711, L"fixture-help.chm", IID_OpenATLValue, E_POINTER);
         *value = 42;
+        ATL::CComPtr<IEnumConnections> snapshot;
+        HRESULT hr = EnumConnections(&snapshot.p);
+        if (FAILED(hr)) return hr;
+        for (;;) {
+            CONNECTDATA data{};
+            hr = snapshot->Next(1, &data, nullptr);
+            if (hr == S_FALSE) break;
+            if (FAILED(hr)) return hr;
+            ATL::CComPtr<IUnknown> held; held.Attach(data.pUnk);
+            hr = static_cast<IOpenATLValueEvents*>(data.pUnk)->OnValue(*value);
+            if (FAILED(hr)) return hr;
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetSecond(LONG* value) noexcept override {

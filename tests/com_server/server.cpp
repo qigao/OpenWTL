@@ -27,6 +27,7 @@ using namespace OpenATL::COM;
     return false; } } while (0)
 
 bool RunAtlCompatibilityTests();
+bool RunDllConnectionPointTests(IOpenATLValue* object, IEnumConnections** retained);
 bool RunAtlAutoAggregateTests(bool multiThreaded);
 bool RunAtlErrorInfoTests();
 bool RunAtlDispatchTests();
@@ -415,6 +416,7 @@ bool aggregateDll(Dll& dll, bool nativeCom) {
     REQUIRE(outer.QueryInterface(IID_OpenATLValue, reinterpret_cast<void**>(&value.p)) == S_OK && outer.refs == 2);
     LONG result = 0;
     REQUIRE(value->GetValue(&result) == S_OK && result == 42);
+    REQUIRE(RunDllConnectionPointTests(value.p, nullptr));
     ATL::CComPtr<IOpenATLSecond> second;
     REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && outer.refs == 3);
     REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
@@ -1701,6 +1703,28 @@ bool native(DWORD apartment) {
     REQUIRE(RunAtlAutoAggregateTests(apartment == COINIT_MULTITHREADED));
     REQUIRE(RunAtlErrorInfoTests());
     REQUIRE(autoAggregateDll(dll));
+    {
+        ATL::CComPtr<IOpenATLValue> eventObject;
+        REQUIRE(::CoCreateInstance(CLSID_OpenATLValue, nullptr, CLSCTX_INPROC_SERVER,
+            IID_OpenATLValue, reinterpret_cast<void**>(&eventObject.p)) == S_OK);
+        ATL::CComPtr<IEnumConnections> snapshot, clone;
+        REQUIRE(RunDllConnectionPointTests(eventObject.p, &snapshot.p));
+        REQUIRE(snapshot->Clone(&clone.p) == S_OK);
+        eventObject.Release();
+        ::CoFreeUnusedLibrariesEx(0, 0);
+        REQUIRE(dll.unload() == S_FALSE); // Only the enumeration owns the source.
+        CONNECTDATA data{};
+        REQUIRE(snapshot->Next(1, &data, nullptr) == S_OK && data.pUnk && data.dwCookie);
+        ATL::CComPtr<IUnknown> held; held.Attach(data.pUnk);
+        ATL::CComPtr<IOpenATLValueEvents> sink;
+        REQUIRE(held->QueryInterface(IID_OpenATLValueEvents, reinterpret_cast<void**>(&sink.p)) == S_OK);
+        REQUIRE(sink->OnValue(42) == S_OK);
+        sink.Release(); held.Release(); snapshot.Release();
+        REQUIRE(dll.unload() == S_FALSE); // Clone retains the same snapshot.
+        clone.Release();
+        ::CoFreeUnusedLibrariesEx(0, 0);
+        REQUIRE(dll.unload() == S_OK);
+    }
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
     REQUIRE(embeddedDispatch(dll));
     REQUIRE(embeddedDispatch(dll, "OpenATLCreateRegisteredDispatch"));
