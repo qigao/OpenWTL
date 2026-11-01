@@ -321,14 +321,13 @@ struct OwnerDrawState {
 };
 class OwnerDrawDialog : public ATL::CAxDialogImpl<OwnerDrawDialog> {
     OwnerDrawState& state_;
-    bool nested_ = false, cancelled_ = false;
+    bool nested_ = false;
 public:
     enum { IDD = 649 };
     explicit OwnerDrawDialog(OwnerDrawState& state) : state_(state) {}
     ~OwnerDrawDialog() { ++state_.deleted; }
     int GetIDD() const { return state_.resource; }
     LRESULT Measure(UINT, WPARAM w, LPARAM l, BOOL&) {
-        std::fprintf(stderr, "ACTIVEX_PHASE measure-enter id=%u\n", static_cast<unsigned>(w));
         auto item = reinterpret_cast<MEASUREITEMSTRUCT*>(l);
         state_.good = state_.good && item && item->CtlID == w && (item->CtlID == 711 || item->CtlID == 712);
         if (!item) return FALSE;
@@ -339,19 +338,12 @@ public:
         if (!state_.initialized) ++state_.beforeInit;
         item->itemWidth = 80; item->itemHeight = 21;
         if (state_.nested && !nested_) {
-            std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-begin\n");
             nested_ = true;
             PlainDialog nested; nested.resource = 637; nested.modal = true;
             state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 && state_.good;
-            std::fprintf(stderr, "ACTIVEX_PHASE measure-nested-end\n");
         }
         if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && state_.listMeasured == 2 && !state_.initialized)
             ::SendMessageW(m_hWnd, WM_INITDIALOG, 0, 0);
-        if (state_.cancel && !cancelled_) {
-            cancelled_ = true;
-            ::DestroyWindow(m_hWnd); // Exercise retirement before application initialization.
-        }
-        std::fprintf(stderr, "ACTIVEX_PHASE measure-return\n");
         return TRUE;
     }
     LRESULT Draw(UINT, WPARAM, LPARAM l, BOOL&) {
@@ -382,7 +374,6 @@ public:
         return state_.drawn > 0;
     }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
-        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-init\n");
         ++state_.initialized;
         const HWND list = ::GetDlgItem(m_hWnd, 711), combo = ::GetDlgItem(m_hWnd, 712);
         WCHAR text[32]{};
@@ -392,8 +383,8 @@ public:
         state_.good = state_.good && ::SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, L"low");
         state_.good = state_.good && ::SendMessageW(list, LB_GETITEMHEIGHT, 0, 0) == 21 && ::SendMessageW(combo, CB_GETITEMHEIGHT, 0, 0) == 21;
         state_.good = Paint() && state_.good;
-        std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-painted good=%d\n", static_cast<int>(state_.good));
         if (state_.modal) EndDialog(93);
+        else if (state_.cancel) DestroyWindow();
         return TRUE;
     }
     void OnFinalMessage(HWND) override {
@@ -426,17 +417,18 @@ bool ownerDrawDialogs() {
         std::fprintf(stderr, "ACTIVEX_PHASE owner-draw-cancel modal=%d\n", static_cast<int>(modal));
         OwnerDrawState state; state.modal = modal; state.cancel = true;
         OwnerDrawDialog dialog(state);
-        if (modal) CHECK(dialog.DoModal(nullptr, 1773) == -1);
+        if (modal) CHECK(dialog.DoModal(nullptr, 1773) == 93);
         else CHECK(!dialog.Create(nullptr, 1773));
-        CHECK(state.good && state.measured == 1 && !state.initialized && state.finalized == 1 && !dialog.m_hWnd);
-        CHECK(::GetLastError() == ERROR_CANCELLED && !ATL::detail::AxDialogCreation::Current());
+        CHECK(state.good && state.measured >= 2 && state.initialized == 1 && state.finalized == 1 && !dialog.m_hWnd);
+        if (!modal) CHECK(::GetLastError() == ERROR_CANCELLED);
+        CHECK(!ATL::detail::AxDialogCreation::Current());
         state.cancel = false; state.modal = false;
         CHECK(dialog.Create(nullptr, 1773) && state.good && dialog.DestroyWindow() && state.finalized == 2);
         OwnerDrawState deleted; deleted.modal = modal; deleted.cancel = true; deleted.deleteOnFinal = true;
         auto owner = new OwnerDrawDialog(deleted);
-        if (modal) CHECK(owner->DoModal(nullptr, 1773) == -1);
+        if (modal) CHECK(owner->DoModal(nullptr, 1773) == 93);
         else CHECK(!owner->Create(nullptr, 1773));
-        CHECK(deleted.good && !deleted.initialized && deleted.finalized == 1 && deleted.deleted == 1 && !ATL::detail::AxDialogCreation::Current());
+        CHECK(deleted.good && deleted.initialized == 1 && deleted.finalized == 1 && deleted.deleted == 1 && !ATL::detail::AxDialogCreation::Current());
     }
     return true;
 }

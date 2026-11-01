@@ -797,9 +797,10 @@ application initialization, measured item heights, sorted/copied strings and
 WM_DRAWITEM while painting into an in-memory DIB DC. Painting after modeless
 Create also verifies that application callbacks work after creation-context
 handoff. Measurement creates a nested modal resource dialog; variable measurement
-sends a recursive WM_INITDIALOG which must not initialize twice. Early native
-window destruction, owner reuse and self-deleting final callbacks verify retirement
-before WM_INITDIALOG. Existing ActiveX load-failure tests count final callbacks
+sends a recursive WM_INITDIALOG which must not initialize twice. Immediate close
+from application WM_INITDIALOG, owner reuse and self-deleting final callbacks
+verify retirement after context handoff. Early measurement only supplies dimensions;
+child contents are queried after native construction. Existing ActiveX load-failure tests count final callbacks
 exactly when an early message attached the C++ owner. Native storage/stream/sink
 regressions remain in their existing modes and 25-second budgets. This software
 painting does not invoke a printer or hardware HSP.
