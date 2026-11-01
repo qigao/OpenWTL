@@ -15,16 +15,18 @@ HRESULT registerFixture(BOOL installing) noexcept;
 // continues to use the same OpenATL::COM::Module factory/owner engine.
 class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public ATL::CComCoClass<Value, &CLSID_OpenATLValue>,
-              public IOpenATLDerived, public IOpenATLSecond {
+              public IOpenATLDerived, public IOpenATLSecond,
+              public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue> {
 public:
     BEGIN_COM_MAP(Value)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLDerived, IOpenATLDerived)
         COM_INTERFACE_ENTRY2_IID(IID_OpenATLValue, IOpenATLValue, IOpenATLDerived)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLSecond, IOpenATLSecond)
+        COM_INTERFACE_ENTRY(ISupportErrorInfo)
     END_COM_MAP()
     DECLARE_REGISTRY_RESOURCEID(IDR_OPENATL_VALUE)
     HRESULT STDMETHODCALLTYPE GetValue(LONG* value) noexcept override {
-        if (!value) return E_POINTER;
+        if (!value) return Error(UINT(IDS_OPENATL_ERROR), 711, L"fixture-help.chm", IID_OpenATLValue, E_POINTER);
         *value = 42;
         return S_OK;
     }

@@ -33,6 +33,8 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `DECLARE_LIBID(id)` | Original ATL module `InitLibId()` pattern initializes `CAtlModule::m_libid` at module construction. A native derived DLL module test checks actual GUID identity and avoids type-library registration side effects. |
 | `atlcom.h`: `CComObjectRootBase`, `CComObjectRootEx`, `CComObjectRoot` | Nonaggregated reference counting, thread-model critical section, construction/release hooks |
 | `CComObject<T>` | Concrete IUnknown, raw creation with initial reference count **zero**, typed QI, last-release destruction |
+| `CComCoClass::Error`, `AtlReportError` | Six text/ANSI/resource overloads each; native ICreateErrorInfo/IErrorInfo publication, IID/description/help/source metadata and standard default/explicit HRESULT mapping. Resource text uses the selected image without fixed-buffer truncation. See error reporting below. |
+| `ISupportErrorInfoImpl<&IID>` | Native ISupportErrorInfo declaration with S_OK for the declared IID and S_FALSE otherwise; ordinary and cached tear-off error views share the owner identity. |
 | `CComCoClass<T, &CLSID>`, `CComCreator<Object>`, `CComCreator2` | Default aggregatable creator selection, CLSID accessor, owned local creation and class-declared nonaggregated/aggregate-only policies. Explicit CComCreator<CComObject<T>> remains nonaggregated. |
 | `CComContainedObject<T>`, `CComAggObject<T>` | Delegating contained interfaces and separate nondelegating inner IUnknown, zero-ref raw creation, construction failure cleanup and module pins through contained destruction. The outer identity is borrowed, not retained cyclically. |
 | `DECLARE_AGGREGATABLE`, `DECLARE_NOT_AGGREGATABLE`, `DECLARE_ONLY_AGGREGATABLE` | Built-in creator policies honored by direct CComCoClass creation and OBJECT_ENTRY_AUTO factories; aggregate factory creation requires IID_IUnknown. Custom factory policies and CComPolyObject remain unqualified. |
@@ -183,3 +185,34 @@ in FinalRelease. Concurrent manual slot replacement is outside the contract.
 Specific entries propagate failures; blind entries continue through the map
 after any failed activation/interface query. IUnknown never triggers lazy
 creation and always remains the owner's canonical identity.
+
+
+## Rich COM error information
+
+CComCoClass::Error forwards its class CLSID to AtlReportError. Both expose
+wide/ANSI text, text with help metadata, resource ID and resource ID with help
+metadata overloads. Text defaults to DISP_E_EXCEPTION; resource IDs default to
+MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, id). A nonzero explicit HRESULT is
+returned unchanged, including success statuses. Native ICreateErrorInfo stores
+the supplied IID, copied description, help context/file and registered ProgID
+source when ProgIDFromCLSID can resolve it. Missing registration leaves the
+source empty; no substitute source or registry write is introduced.
+
+The helpers replace the calling logical thread's native error object and clear
+stale information if metadata preparation fails. Metadata is best effort and
+does not replace the documented returned HRESULT. ANSI strings use Windows
+CP_ACP. Resource IDs use the selected/default _AtlBaseModule resource image;
+LoadStringW's pointer/length form is copied into an owned BSTR. Invalid/missing
+resources assert in debug builds and report `Unknown Error.` in release builds.
+
+ISupportErrorInfoImpl advertises one supported IID; clients retrieve native
+GetErrorInfo immediately after a failed call. GetErrorInfo transfers ownership
+and clears that thread's pending error. This does not marshal error objects,
+initialize an application apartment, or guarantee propagation across arbitrary
+proxy calls/message loops. Existing tests cover the twelve public overloads,
+metadata ownership, replacement, consumed state and native thread isolation;
+actual DLL resource errors survive object release, unregistration and DLL
+unload. Existing TypeLib cases verify a real IOuter Invoke failure and its
+native EXCEPINFO description, help metadata and HRESULT. Arbitrary Automation
+argument conversion, remote error propagation and all original COMMap sources
+remain separate acceptance work.

@@ -32,6 +32,95 @@ protected:
     CComPtr<IUnknown> m_spUnkSite;
 };
 
+// Native OLE error objects carry copied metadata independently of the server
+// object's lifetime. No application apartment is initialized by these helpers.
+namespace detail {
+inline HRESULT ReportErrorWithoutInfo(HRESULT result) noexcept {
+    ::SetErrorInfo(0, nullptr);
+    return result;
+}
+inline HRESULT ReportErrorWide(REFCLSID clsid, LPCOLESTR description,
+    DWORD helpContext, LPCOLESTR helpFile, REFIID iid, HRESULT result) noexcept {
+    ::SetErrorInfo(0, nullptr); // Never leave an earlier error on a failed setup.
+    CComPtr<ICreateErrorInfo> create;
+    if (FAILED(::CreateErrorInfo(&create.p)) || !create.p) return result;
+    if (FAILED(create->SetGUID(iid)) ||
+        FAILED(create->SetDescription(const_cast<LPOLESTR>(description ? description : L""))) ||
+        FAILED(create->SetHelpContext(helpContext)) ||
+        FAILED(create->SetHelpFile(const_cast<LPOLESTR>(helpFile ? helpFile : L"")))) return result;
+    LPOLESTR progId = nullptr;
+    const HRESULT lookup = ::ProgIDFromCLSID(clsid, &progId);
+    const HRESULT source = SUCCEEDED(lookup) && progId ? create->SetSource(progId) : S_OK;
+    ::CoTaskMemFree(progId);
+    if (FAILED(source)) return result;
+    CComPtr<IErrorInfo> error;
+    if (SUCCEEDED(create->QueryInterface(IID_IErrorInfo, reinterpret_cast<void**>(&error.p))) && error.p)
+        ::SetErrorInfo(0, error.p);
+    return result; // Reporting metadata must not replace the documented HRESULT.
+}
+inline bool ErrorTextFromAnsi(LPCSTR text, CComBSTR& output) noexcept {
+    if (!text) return true;
+    const int count = ::MultiByteToWideChar(CP_ACP, 0, text, -1, nullptr, 0);
+    if (count <= 0) return false;
+    output.Attach(::SysAllocStringLen(nullptr, static_cast<UINT>(count - 1)));
+    if (!output.m_str) return false;
+    return ::MultiByteToWideChar(CP_ACP, 0, text, -1, output.m_str, count) == count;
+}
+} // namespace detail
+
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, LPCOLESTR description,
+    DWORD helpContext, LPCOLESTR helpFile, REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+    return detail::ReportErrorWide(clsid, description, helpContext, helpFile,
+        iid, result ? result : DISP_E_EXCEPTION);
+}
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, LPCOLESTR description,
+    REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+    return AtlReportError(clsid, description, 0, static_cast<LPCOLESTR>(nullptr), iid, result);
+}
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, LPCSTR description,
+    DWORD helpContext, LPCSTR helpFile, REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+    const HRESULT returned = result ? result : DISP_E_EXCEPTION;
+    CComBSTR wideDescription, wideHelp;
+    if (!detail::ErrorTextFromAnsi(description, wideDescription) ||
+        !detail::ErrorTextFromAnsi(helpFile, wideHelp)) return detail::ReportErrorWithoutInfo(returned);
+    return detail::ReportErrorWide(clsid, wideDescription.m_str, helpContext, wideHelp.m_str, iid, returned);
+}
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, LPCSTR description,
+    REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+    return AtlReportError(clsid, description, 0, static_cast<LPCSTR>(nullptr), iid, result);
+}
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, UINT id, DWORD helpContext,
+    LPCOLESTR helpFile, REFIID iid = GUID_NULL, HRESULT result = 0,
+    HINSTANCE image = _AtlBaseModule.GetResourceInstance()) noexcept {
+    const HRESULT returned = result ? result : MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, id);
+    ATLASSERT(id >= 0x200 && id <= 0xffff);
+    LPCWSTR resource = nullptr;
+    const int length = id >= 0x200 && id <= 0xffff
+        ? ::LoadStringW(image, id, reinterpret_cast<LPWSTR>(&resource), 0) : 0;
+    ATLASSERT(length > 0 && resource);
+    if (length <= 0 || !resource)
+        return detail::ReportErrorWide(clsid, L"Unknown Error.", helpContext, helpFile, iid, returned);
+    // LoadString's pointer form has a length, but no trailing zero. Copy the
+    // entire resource instead of truncating it into a fixed stack buffer.
+    CComBSTR description;
+    description.Attach(::SysAllocStringLen(resource, static_cast<UINT>(length)));
+    if (!description.m_str) return detail::ReportErrorWithoutInfo(returned);
+    return detail::ReportErrorWide(clsid, description.m_str, helpContext, helpFile, iid, returned);
+}
+inline HRESULT WINAPI AtlReportError(REFCLSID clsid, UINT id,
+    REFIID iid = GUID_NULL, HRESULT result = 0,
+    HINSTANCE image = _AtlBaseModule.GetResourceInstance()) noexcept {
+    return AtlReportError(clsid, id, 0, static_cast<LPCOLESTR>(nullptr), iid, result, image);
+}
+
+template<const IID* InterfaceId>
+class ATL_NO_VTABLE ISupportErrorInfoImpl : public ISupportErrorInfo {
+public:
+    HRESULT STDMETHODCALLTYPE InterfaceSupportsErrorInfo(REFIID iid) noexcept override {
+        return IsEqualIID(iid, *InterfaceId) ? S_OK : S_FALSE;
+    }
+};
+
 class CComObjectRootBase {
 public:
     HRESULT FinalConstruct() noexcept { return S_OK; }
@@ -556,6 +645,29 @@ template<class T, const CLSID* ClassId = &CLSID_NULL>
 class CComCoClass {
 public:
     using _CreatorClass = CComCreator2<CComCreator<CComObject<T>>, CComCreator<CComAggObject<T>>>;
+    static HRESULT WINAPI Error(LPCOLESTR text, REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+        return AtlReportError(GetObjectCLSID(), text, iid, result);
+    }
+    static HRESULT WINAPI Error(LPCOLESTR text, DWORD help, LPCOLESTR file,
+                                 REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+        return AtlReportError(GetObjectCLSID(), text, help, file, iid, result);
+    }
+    static HRESULT WINAPI Error(LPCSTR text, REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+        return AtlReportError(GetObjectCLSID(), text, iid, result);
+    }
+    static HRESULT WINAPI Error(LPCSTR text, DWORD help, LPCSTR file,
+                                 REFIID iid = GUID_NULL, HRESULT result = 0) noexcept {
+        return AtlReportError(GetObjectCLSID(), text, help, file, iid, result);
+    }
+    static HRESULT WINAPI Error(UINT id, REFIID iid = GUID_NULL, HRESULT result = 0,
+                                 HINSTANCE image = _AtlBaseModule.GetResourceInstance()) noexcept {
+        return AtlReportError(GetObjectCLSID(), id, iid, result, image);
+    }
+    static HRESULT WINAPI Error(UINT id, DWORD help, LPCOLESTR file,
+                                 REFIID iid = GUID_NULL, HRESULT result = 0,
+                                 HINSTANCE image = _AtlBaseModule.GetResourceInstance()) noexcept {
+        return AtlReportError(GetObjectCLSID(), id, help, file, iid, result, image);
+    }
     static const CLSID& WINAPI GetObjectCLSID() noexcept { return *ClassId; }
     static HRESULT WINAPI CreateInstance(IUnknown* outer, REFIID iid, void** output) noexcept {
         using CreatorClass = typename T::_CreatorClass;

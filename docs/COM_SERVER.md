@@ -621,3 +621,24 @@ The caller owns COM startup and apartment/marshalling policy. Construction
 uses the owner's lock and bounded recursion guard; see ATL_COMPATIBILITY.md
 for its reentrancy, blocking-hook and slot replacement contracts. This does
 not qualify remote aggregation or the complete original COMMap project.
+
+
+## Native rich error information
+
+CComCoClass::Error and AtlReportError expose all six documented text/ANSI/resource
+forms using native OLE ICreateErrorInfo/IErrorInfo. ISupportErrorInfoImpl provides
+the single-IID support declaration. Metadata is copied into the native error
+object, with IID, help context/file and an optional registered ProgID source.
+Explicit HRESULTs are preserved; text defaults to DISP_E_EXCEPTION and resource
+IDs use FACILITY_ITF. Missing resources report `Unknown Error.` in release builds
+and assert in debug builds. Metadata preparation failures clear stale state and
+preserve the specified/default HRESULT. No second error runtime is present.
+
+Existing STA/MTA cases verify all twelve overloads, Unicode/ACP inputs, long
+resources/text, native GetErrorInfo consumption/replacement and thread isolation.
+The real registered DLL reports an error from its own string resource through
+its existing GetValue method; the client retains that native IErrorInfo through
+server-object release, unregistration and actual DLL unload. Existing ordinary
+and cached tear-off IOuter TypeLib cases execute a failing real Invoke and check
+its native EXCEPINFO. These checks qualify this error-reporting subset, not all
+Automation exceptions or complete original Microsoft application compatibility.

@@ -163,7 +163,7 @@ qualification.
 This qualifies original **IDL generation, embedded/registered TypeLib loading and one
 real Automation property**, not original COMMap project compilation/link or
 original COMMap class activation.
-The unchanged COMMap still needs CComCoClass::Error, exact tear-off member/layout contracts, full registration/API compatibility, broader `IDispatchImpl` and
+The unchanged COMMap still needs exact tear-off member/layout contracts, full registration/API compatibility, broader `IDispatchImpl` and
 generated `aggreg/aggreg.idl`. All 37 original pure-ATL project
 entries remain **not-qualified**.
 
@@ -188,7 +188,7 @@ OpenATL build/runtime tests:
 
 | Sample | Observed dependencies still missing in OpenATL |
 | --- | --- |
-| COMMap | CComCoClass::Error, exact tear-off member/layout contracts, complete registrar APIs and generated `aggreg/aggreg.idl`; implemented basic/automatic aggregation/tear-off/module/dispatch/map subsets do not qualify the whole project |
+| COMMap | Exact tear-off member/layout contracts, complete registrar APIs and generated `aggreg/aggreg.idl`; implemented basic/automatic aggregation/tear-off/module/dispatch/map subsets do not qualify the whole project |
 | ATLCollections | `ICollectionOnSTLImpl`, `CComEnumOnSTL`, complete registrar APIs and generated/imported type-library integration |
 | ATLSafeArray | `atlsafe.h` / `CComSafeArray`, complete control/server support and whole-project generated TypeLib integration |
 
@@ -216,3 +216,9 @@ drives native Invoke and a retained cached interface after DLL owner release.
 This qualifies the mapped API subset, not the unchanged Outer.cpp/Chain.cpp or
 the whole COMMap DLL. Exact Microsoft tear-off member pointer/layout compatibility
 and complete original-project admission remain separate.
+
+
+The Error/AtlReportError/ISupportErrorInfoImpl subset is additionally exercised
+through real native OLE error objects and an original-IOuter failing Invoke.
+This removes that API prerequisite for COMMap but does not admit the unchanged
+Outer.cpp/Chain.cpp or complete generated/imported aggreg project.

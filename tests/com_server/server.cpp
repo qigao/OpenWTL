@@ -28,6 +28,7 @@ using namespace OpenATL::COM;
 
 bool RunAtlCompatibilityTests();
 bool RunAtlAutoAggregateTests(bool multiThreaded);
+bool RunAtlErrorInfoTests();
 bool RunAtlDispatchTests();
 bool RunAtlModuleTests();
 int RunAtlModuleServer(const char* token, bool apartment);
@@ -434,6 +435,32 @@ bool aggregateDll(Dll& dll, bool nativeCom) {
     return true;
 }
 
+bool dllErrorInfoFields(IErrorInfo* error) {
+    GUID iid{};
+    DWORD help = 0;
+    ATL::CComBSTR text, file, source;
+    REQUIRE(error && error->GetGUID(&iid) == S_OK && IsEqualGUID(iid, IID_OpenATLValue));
+    REQUIRE(error->GetHelpContext(&help) == S_OK && help == 711);
+    REQUIRE(error->GetDescription(&text.m_str) == S_OK && text.m_str &&
+        std::wcscmp(text.m_str, L"OpenWTL resource error \u4e2d\u6587") == 0);
+    REQUIRE(error->GetHelpFile(&file.m_str) == S_OK && file.m_str &&
+        std::wcscmp(file.m_str, L"fixture-help.chm") == 0);
+    REQUIRE(error->GetSource(&source.m_str) == S_OK && source.m_str &&
+        std::wcscmp(source.m_str, OpenATLTestProgId) == 0);
+    return true;
+}
+bool captureDllError(IOpenATLValue* value, IErrorInfo** retained) {
+    ATL::CComPtr<ISupportErrorInfo> support;
+    REQUIRE(value->QueryInterface(IID_ISupportErrorInfo, reinterpret_cast<void**>(&support.p)) == S_OK);
+    REQUIRE(support->InterfaceSupportsErrorInfo(IID_OpenATLValue) == S_OK &&
+        support->InterfaceSupportsErrorInfo(IID_IStream) == S_FALSE);
+    support.Release();
+    REQUIRE(value->GetValue(nullptr) == E_POINTER);
+    REQUIRE(::GetErrorInfo(0, retained) == S_OK && *retained);
+    REQUIRE(dllErrorInfoFields(*retained));
+    return true;
+}
+
 class DllAutoAggregateOwner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IPersist {
 public:
     ATL::CComPtr<IUnknown> inner;
@@ -507,6 +534,24 @@ bool tearOffInvoke(IOuter* object, const wchar_t* text) {
     REQUIRE(object->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
         &arguments, &value, nullptr, nullptr) == S_OK);
     REQUIRE(value.vt == VT_BSTR && value.bstrVal && std::wcscmp(value.bstrVal, text) == 0);
+    ATL::CComPtr<ISupportErrorInfo> support;
+    REQUIRE(object->QueryInterface(IID_ISupportErrorInfo, reinterpret_cast<void**>(&support.p)) == S_OK);
+    REQUIRE(support->InterfaceSupportsErrorInfo(IID_IOuter) == S_OK &&
+        support->InterfaceSupportsErrorInfo(IID_IChain) == S_FALSE);
+    support.Release();
+    number.iVal = 8;
+    EXCEPINFO exception{};
+    ATL::CComVariant failedValue;
+    const HRESULT failure = object->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+        &arguments, &failedValue, &exception, nullptr);
+    ATL::CComBSTR errorDescription, errorSource, errorHelp;
+    errorDescription.Attach(exception.bstrDescription);
+    errorSource.Attach(exception.bstrSource);
+    errorHelp.Attach(exception.bstrHelpFile);
+    REQUIRE(failure == DISP_E_EXCEPTION && exception.scode == E_INVALIDARG && exception.dwHelpContext == 712);
+    REQUIRE(errorDescription.m_str && std::wcscmp(errorDescription.m_str, L"Expected number seven") == 0);
+    REQUIRE(errorHelp.m_str && std::wcscmp(errorHelp.m_str, L"tear-help.chm") == 0);
+    ::SetErrorInfo(0, nullptr);
     return true;
 }
 bool verifyTearOffDispatch(IDispatch* owner, IOuter** retained) {
@@ -1654,6 +1699,7 @@ bool native(DWORD apartment) {
     struct ApartmentOwner { ~ApartmentOwner() { ::CoUninitialize(); } } owner;
     REQUIRE(aggregateDll(dll, true));
     REQUIRE(RunAtlAutoAggregateTests(apartment == COINIT_MULTITHREADED));
+    REQUIRE(RunAtlErrorInfoTests());
     REQUIRE(autoAggregateDll(dll));
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
     REQUIRE(embeddedDispatch(dll));
@@ -1674,6 +1720,8 @@ bool native(DWORD apartment) {
                                 IID_OpenATLValue, reinterpret_cast<void**>(&object)) == S_OK);
     LONG value = 0;
     REQUIRE(object->GetValue(&value) == S_OK && value == 42 && identities(object));
+    ATL::CComPtr<IErrorInfo> retainedError;
+    REQUIRE(captureDllError(object.p, &retainedError.p));
     ATL::CComPtr<IOpenATLValue> secondObject;
     REQUIRE(::CoCreateInstance(CLSID_OpenATLAuxValue, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_OpenATLValue, reinterpret_cast<void**>(&secondObject)) == S_OK);
@@ -1697,6 +1745,8 @@ bool native(DWORD apartment) {
                                 IID_OpenATLValue, &missing) == REGDB_E_CLASSNOTREG && !missing);
     REQUIRE(dll.Close());
     REQUIRE(::GetModuleHandleW(L"openatl_com_server_fixture.dll") == nullptr);
+    REQUIRE(dllErrorInfoFields(retainedError.p));
+    retainedError.Release();
     return true;
 }
 } // namespace

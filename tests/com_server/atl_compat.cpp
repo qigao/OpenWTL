@@ -1,4 +1,7 @@
 #include <atlcom.h>
+#include "fixture_registry_ids.h"
+#include <cwchar>
+#include <string>
 #include <atomic>
 #include <cstdio>
 #include <stdexcept>
@@ -660,6 +663,127 @@ bool AutoAggregateNative(bool multiThreaded) {
     return true;
 }
 
+class ErrorOwner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                   public ATL::CComCoClass<ErrorOwner, &classId>,
+                   public ATL::ISupportErrorInfoImpl<&IID_IPersist>, public IPersist {
+public:
+    BEGIN_COM_MAP(ErrorOwner)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY(ISupportErrorInfo)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = classId; return S_OK;
+    }
+};
+bool ErrorFields(const wchar_t* text, REFIID expected, DWORD help = 0,
+                  const wchar_t* file = L"") {
+    ATL::CComPtr<IErrorInfo> error;
+    CHECK(::GetErrorInfo(0, &error.p) == S_OK && error.p);
+    GUID iid{};
+    CHECK(error->GetGUID(&iid) == S_OK && IsEqualGUID(iid, expected));
+    ATL::CComBSTR description, helpFile, source;
+    DWORD context = 0;
+    CHECK(error->GetDescription(&description.m_str) == S_OK);
+    if (std::wstring_view(description.m_str ? description.m_str : L"", description.Length()) != text) {
+        std::fprintf(stderr, "ATL_ERROR_DESCRIPTION expected=%zu actual=%u utf16=", std::wcslen(text), description.Length());
+        for (UINT i = 0; i < description.Length() && i < 64; ++i)
+            std::fprintf(stderr, "%04x ", static_cast<unsigned>(description.m_str[i]));
+        std::fputc('\n', stderr);
+        CHECK(false);
+    }
+    CHECK(error->GetHelpFile(&helpFile.m_str) == S_OK &&
+        std::wstring_view(helpFile.m_str ? helpFile.m_str : L"", helpFile.Length()) == file);
+    CHECK(error->GetHelpContext(&context) == S_OK && context == help);
+    CHECK(error->GetSource(&source.m_str) == S_OK && source.Length() == 0); // Unregistered CLSID.
+    ATL::CComPtr<IErrorInfo> consumed;
+    CHECK(::GetErrorInfo(0, &consumed.p) == S_FALSE && !consumed.p);
+    return true;
+}
+bool NativeErrorInformation() {
+    ATL::CComObject<ErrorOwner>* owner = nullptr;
+    CHECK(ATL::CComObject<ErrorOwner>::CreateInstance(&owner) == S_OK && owner->AddRef() == 1);
+    ATL::CComPtr<ISupportErrorInfo> support;
+    CHECK(owner->QueryInterface(IID_ISupportErrorInfo, reinterpret_cast<void**>(&support.p)) == S_OK);
+    CHECK(support->InterfaceSupportsErrorInfo(IID_IPersist) == S_OK &&
+        support->InterfaceSupportsErrorInfo(IID_IStream) == S_FALSE);
+    support.Release(); CHECK(owner->Release() == 0);
+
+    CHECK(ErrorOwner::Error(L"Unicode \u4e2d\u6587") == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"Unicode \u4e2d\u6587", GUID_NULL));
+    wchar_t description[] = L"owned description", helpFile[] = L"help.chm";
+    CHECK(ErrorOwner::Error(description, 123, helpFile, IID_IPersist, E_ACCESSDENIED) == E_ACCESSDENIED);
+    description[0] = L'X'; helpFile[0] = L'X';
+    CHECK(ErrorFields(L"owned description", IID_IPersist, 123, L"help.chm"));
+    CHECK(ErrorOwner::Error("ANSI description") == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"ANSI description", GUID_NULL));
+    char narrow[] = "owned ANSI", narrowHelp[] = "ansi.chm";
+    CHECK(ErrorOwner::Error(narrow, 124, narrowHelp, IID_IPersist, S_FALSE) == S_FALSE);
+    narrow[0] = 'X'; narrowHelp[0] = 'X';
+    CHECK(ErrorFields(L"owned ANSI", IID_IPersist, 124, L"ansi.chm"));
+    CHECK(ErrorOwner::Error(UINT(IDS_OPENATL_ERROR)) == MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, IDS_OPENATL_ERROR));
+    CHECK(ErrorFields(L"OpenWTL resource error \u4e2d\u6587", GUID_NULL));
+    CHECK(ErrorOwner::Error(UINT(IDS_OPENATL_ERROR), 125, L"resource.chm", IID_IPersist,
+        E_ABORT, ATL::_AtlBaseModule.GetModuleInstance()) == E_ABORT);
+    CHECK(ErrorFields(L"OpenWTL resource error \u4e2d\u6587", IID_IPersist, 125, L"resource.chm"));
+
+    CHECK(ATL::AtlReportError(classId, L"global wide", IID_IPersist, E_FAIL) == E_FAIL);
+    CHECK(ErrorFields(L"global wide", IID_IPersist));
+    CHECK(ATL::AtlReportError(classId, L"global help", 126, L"global.chm") == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"global help", GUID_NULL, 126, L"global.chm"));
+    CHECK(ATL::AtlReportError(classId, "global ANSI") == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"global ANSI", GUID_NULL));
+    CHECK(ATL::AtlReportError(classId, "global ANSI help", 127, "global-ansi.chm", IID_IPersist) == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"global ANSI help", IID_IPersist, 127, L"global-ansi.chm"));
+    CHECK(ATL::AtlReportError(classId, UINT(IDS_OPENATL_ERROR), IID_IPersist, E_POINTER) == E_POINTER);
+    CHECK(ErrorFields(L"OpenWTL resource error \u4e2d\u6587", IID_IPersist));
+    CHECK(ATL::AtlReportError(classId, UINT(IDS_OPENATL_ERROR), 128, L"last.chm") ==
+        MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, IDS_OPENATL_ERROR));
+    CHECK(ErrorFields(L"OpenWTL resource error \u4e2d\u6587", GUID_NULL, 128, L"last.chm"));
+    CHECK(ErrorOwner::Error(static_cast<LPCOLESTR>(nullptr)) == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"", GUID_NULL));
+#ifdef NDEBUG
+    CHECK(ErrorOwner::Error(UINT(0xfffe)) == MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xfffe));
+    CHECK(ErrorFields(L"Unknown Error.", GUID_NULL));
+#endif
+    CHECK(ErrorOwner::Error(UINT(IDS_OPENATL_ERROR_LONG)) ==
+        MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, IDS_OPENATL_ERROR_LONG));
+    std::wstring longResource;
+    for (int i = 0; i < 80; ++i) longResource += L"0123456789abcdef";
+    CHECK(ErrorFields(longResource.c_str(), GUID_NULL));
+    const std::string longAnsi(4096, 'a');
+    CHECK(ErrorOwner::Error(longAnsi.c_str()) == DISP_E_EXCEPTION);
+    const std::wstring wideAnsi(4096, L'a');
+    CHECK(ErrorFields(wideAnsi.c_str(), GUID_NULL));
+
+    CHECK(ErrorOwner::Error(L"previous") == DISP_E_EXCEPTION);
+    ATL::CComPtr<IErrorInfo> previous;
+    CHECK(::GetErrorInfo(0, &previous.p) == S_OK && previous.p);
+    CHECK(::SetErrorInfo(0, previous.p) == S_OK);
+    CHECK(ErrorOwner::Error(L"replacement") == DISP_E_EXCEPTION);
+    CHECK(ErrorFields(L"replacement", GUID_NULL));
+    ATL::CComBSTR previousText;
+    CHECK(previous->GetDescription(&previousText.m_str) == S_OK && std::wcscmp(previousText.m_str, L"previous") == 0);
+    previous.Release();
+
+    CHECK(ErrorOwner::Error(L"main pending", 1000, L"thread.chm", IID_IPersist) == DISP_E_EXCEPTION);
+    std::atomic<bool> good{true};
+    std::vector<std::thread> workers;
+    for (DWORD n = 1; n <= 4; ++n) workers.emplace_back([&, n] {
+        const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(initialized)) { good = false; return; }
+        for (int i = 0; i < 20; ++i) {
+            if (ErrorOwner::Error(L"worker", n, L"worker.chm", IID_IPersist) != DISP_E_EXCEPTION) good = false;
+            std::this_thread::yield();
+            if (!ErrorFields(L"worker", IID_IPersist, n, L"worker.chm")) good = false;
+        }
+        ::CoUninitialize();
+    });
+    for (auto& worker : workers) worker.join();
+    CHECK(good && ErrorFields(L"main pending", IID_IPersist, 1000, L"thread.chm"));
+    return true;
+}
+
 inline constexpr IID iidOrdinaryTear = {0xf9cb25e1, 0x2573, 0x4af4,
     {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
 inline constexpr IID iidCachedTear = {0xf9cb25e2, 0x2573, 0x4af4,
@@ -961,3 +1085,5 @@ bool RunAtlCompatibilityTests() {
 bool RunAtlAutoAggregateTests(bool multiThreaded) {
     return AutoAggregateNative(multiThreaded);
 }
+
+bool RunAtlErrorInfoTests() { return NativeErrorInformation(); }
