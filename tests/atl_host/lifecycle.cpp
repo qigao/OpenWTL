@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <new>
 #include <cstring>
+#include <cwchar>
 #include <thread>
 
 #define REQUIRE(x) do { if (!(x)) { std::fprintf(stderr, "HOST_LIFECYCLE_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
@@ -279,7 +280,7 @@ struct PropertyState {
     IOleControlSite* site = nullptr;
     IUnknown* identity = nullptr;
     HWND owner = nullptr;
-    LCID locale = 0x0409;
+    LCID locale = 0x040c; // Explicit French LCID, rather than the runner's usual default.
     HRESULT pagesResult = S_OK, activationResult = S_OK;
     bool empty = false, malformed = false, destroyOnQuery = false, destroyOnPages = false;
     bool cancel = false, captionFailure = false, good = true, reenter = true;
@@ -611,6 +612,11 @@ private:
         }
         const HWND frame = ::GetAncestor(window_, GA_ROOT);
         state_.good = ::GetAncestor(frame, GA_ROOTOWNER) == state_.owner && state_.good;
+        WCHAR caption[128]{};
+        state_.good = ::GetWindowTextW(frame, caption, 128) > 0 && state_.good;
+        state_.good = state_.good && (state_.captionFailure ?
+            !std::wcsstr(caption, L"OpenWTL control") && std::wcsstr(caption, L"Properties") :
+            std::wcsstr(caption, L"OpenWTL control") != nullptr);
         ::SetActiveWindow(frame); // BM_CLICK requires an active dialog.
         const HWND button = ::GetDlgItem(frame, state_.cancel ? IDCANCEL : IDOK);
         if (!button || !::PostMessageW(button, BM_CLICK, 0, 0)) {
