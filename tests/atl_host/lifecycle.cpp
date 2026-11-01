@@ -31,8 +31,19 @@ public:
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (state_) state_->refs = n; if (!n) delete this; return n; }
     HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS*, VARIANT*, EXCEPINFO*, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID iid, LPOLESTR* names, UINT count, LCID, DISPID* ids) override {
+        if (iid != IID_NULL) return DISP_E_UNKNOWNINTERFACE;
+        if (!names || !ids) return E_POINTER;
+        if (count != 1 || !names[0] || ::CompareStringOrdinal(names[0], -1, L"OpenWTLHostToken", -1, TRUE) != CSTR_EQUAL) return DISP_E_UNKNOWNNAME;
+        ids[0] = 1234; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID id, REFIID iid, LCID, WORD flags, DISPPARAMS* args, VARIANT* result, EXCEPINFO*, UINT*) override {
+        if (iid != IID_NULL) return DISP_E_UNKNOWNINTERFACE;
+        if (id != 1234 || flags != DISPATCH_PROPERTYGET) return DISP_E_MEMBERNOTFOUND;
+        if (!args || !result) return E_POINTER;
+        if (args->cArgs || args->cNamedArgs) return DISP_E_BADPARAMCOUNT;
+        ::VariantInit(result); result->vt = VT_I4; result->lVal = 0x4f57544c; return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE DragEnter(IDataObject*, DWORD, POINTL, DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE DragLeave() override { return E_NOTIMPL; }
@@ -733,10 +744,13 @@ bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
     REQUIRE(window.SetExternalUIHandler(handler) == S_OK);
     ATL::CComPtr<IHTMLWindow2> script; REQUIRE(document->get_parentWindow(&script) == S_OK && script);
     ATL::CComPtr<IDispatch> external; REQUIRE(script->get_external(&external) == S_OK);
-    ATL::CComPtr<IUnknown> expected, actual;
-    REQUIRE(object->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&expected)) == S_OK);
-    REQUIRE(external && external->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&actual)) == S_OK && actual == expected);
-    REQUIRE(state.calls[12] > 0 && window.SetExternalUIHandler(nullptr) == S_OK);
+    REQUIRE(state.calls[12] > 0 && external);
+    LPOLESTR name = const_cast<LPOLESTR>(L"OpenWTLHostToken"); DISPID id = DISPID_UNKNOWN;
+    REQUIRE(external->GetIDsOfNames(IID_NULL, &name, 1, LOCALE_USER_DEFAULT, &id) == S_OK);
+    DISPPARAMS args{}; ATL::CComVariant value;
+    REQUIRE(external->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET, &args, &value, nullptr, nullptr) == S_OK &&
+        value.vt == VT_I4 && value.lVal == 0x4f57544c);
+    REQUIRE(window.SetExternalUIHandler(nullptr) == S_OK);
     handler.Release(); REQUIRE(state.destroyed == 1 && !state.diedInside);
     return true;
 }

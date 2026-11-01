@@ -551,7 +551,7 @@ handler, verify negative coordinates, high-bit accelerator values, native string
 allocators, interface identity/ownership, null and failed outputs, transport vs
 callback status, wrong-thread mutation and reentrant replacement/retirement.
 The existing real WebBrowser case obtains IHTMLWindow2::external from the loaded
-MSHTML document and checks the application's actual COM identity. Executables,
+MSHTML document and invokes the application's Automation property. Executables,
 modes, stdout/stderr contracts, timeout budgets and workflows are unchanged;
 real printing and hardware HSP remain outside CI. The 36 original Microsoft
 blobs and the whole-application admission graph are unchanged.
