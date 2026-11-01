@@ -9,6 +9,7 @@
 #include <mshtml.h>
 #include <exdisp.h>
 #include <new>
+#include <cstring>
 
 namespace ATL {
 namespace detail {
@@ -475,6 +476,45 @@ inline BOOL WINAPI AtlAxWinTerm() noexcept {
     BOOL licensed = ::UnregisterClassW(L"AtlAxWinLic140", _AtlBaseModule.GetModuleInstance());
     return regular && licensed;
 }
+namespace detail {
+inline BOOL PrepareAxDialog(HINSTANCE instance, LPCWSTR name) noexcept {
+    if (!name) { ::SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    const HRSRC resource = ::FindResourceW(instance, name, MAKEINTRESOURCEW(5));
+    if (!resource) return FALSE;
+    const DWORD size = ::SizeofResource(instance, resource);
+    const HGLOBAL loaded = ::LoadResource(instance, resource);
+    const auto bytes = static_cast<const BYTE*>(::LockResource(loaded));
+    if (!bytes || size < sizeof(DLGTEMPLATE)) { ::SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    WORD signature = 0; DWORD style = 0;
+    std::memcpy(&signature, bytes + sizeof(WORD), sizeof(signature));
+    if (signature == 0xFFFF) {
+        if (size < sizeof(_DialogSplitHelper::DLGTEMPLATEEX)) { ::SetLastError(ERROR_INVALID_DATA); return FALSE; }
+        std::memcpy(&style, bytes + 12, sizeof(style));
+    } else std::memcpy(&style, bytes, sizeof(style));
+    // Persistence streams, license records and CLSID-placeholder splitting
+    // are not implemented. Never silently omit their initialization data.
+    if ((style & DS_NOFAILCREATE) || ::FindResourceW(instance, name, MAKEINTRESOURCEW(240))) {
+        ::SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
+    }
+    return AtlAxWinInit();
+}
+inline DWORD AxDialogError(HRESULT hr) noexcept {
+    if (HRESULT_FACILITY(hr) == FACILITY_WIN32) return HRESULT_CODE(hr);
+    if (hr == E_OUTOFMEMORY) return ERROR_OUTOFMEMORY;
+    if (hr == E_POINTER || hr == E_INVALIDARG) return ERROR_INVALID_PARAMETER;
+    return ERROR_GEN_FAILURE;
+}
+}
+inline HWND WINAPI AtlAxCreateDialog(HINSTANCE instance, LPCWSTR name, HWND parent,
+    DLGPROC procedure, LPARAM parameter) noexcept {
+    if (!detail::PrepareAxDialog(instance, name)) return nullptr;
+    return ::CreateDialogParamW(instance, name, parent, procedure, parameter);
+}
+inline int WINAPI AtlAxDialogBox(HINSTANCE instance, LPCWSTR name, HWND parent,
+    DLGPROC procedure, LPARAM parameter) noexcept {
+    if (!detail::PrepareAxDialog(instance, name)) return -1;
+    return static_cast<int>(::DialogBoxParamW(instance, name, parent, procedure, parameter));
+}
 inline HRESULT WINAPI AtlAxGetHost(HWND window, IUnknown** output) noexcept {
     if (!output) return E_POINTER; *output = nullptr;
     CComPtr<detail::AxHost> host;
@@ -567,6 +607,101 @@ public:
     HRESULT AttachControl(IUnknown* control, IUnknown** host = nullptr) noexcept { return AtlAxAttachControl(control, this->m_hWnd, host); }
 };
 using CAxWindow = CAxWindowT<CWindow>;
+
+template<class T, class TBase>
+class CAxDialogImpl : public CDialogImplBaseT<TBase> {
+    using Base = CDialogImplBaseT<TBase>;
+    struct Creation { DWORD error = ERROR_SUCCESS; bool initialized = false, destroyed = false; };
+    Creation* creation_ = nullptr;
+    bool BeginCreation(Creation& state, bool modal) noexcept {
+        if (creation_ || this->m_hWnd) { ::SetLastError(ERROR_ALREADY_EXISTS); return false; }
+        if (!this->m_thunk.Init(nullptr, nullptr)) return false;
+        m_bModal = modal;
+        creation_ = &state;
+        _AtlWinModule.AddCreateWndData(&this->m_thunk.cd, static_cast<Base*>(this));
+        return true;
+    }
+public:
+    int GetIDD() noexcept { return static_cast<T*>(this)->IDD; }
+    HRESULT AdviseSinkMap(bool advise) noexcept {
+        if constexpr (requires { T::_GetSinkMap(); }) return AtlAdviseSinkMap(static_cast<T*>(this), advise);
+        else return S_OK; // An owner without a sink map has no event entries.
+    }
+    HWND Create(HWND parent, LPARAM parameter = 0) noexcept {
+        Creation state;
+        if (!BeginCreation(state, false)) return nullptr;
+        const auto pending = &this->m_thunk.cd;
+        const HWND window = AtlAxCreateDialog(_AtlBaseModule.GetResourceInstance(),
+            MAKEINTRESOURCEW(static_cast<T*>(this)->GetIDD()), parent, T::StartDialogProc, parameter);
+        const DWORD error = ::GetLastError();
+        (void)_AtlWinModule.RemoveCreateWndData(pending);
+        // WM_INITDIALOG/OnFinalMessage may already have deleted the owner.
+        if (!state.destroyed) creation_ = nullptr;
+        if (state.error || state.destroyed || !state.initialized || !window) {
+            ::SetLastError(state.error ? state.error : state.destroyed ? ERROR_CANCELLED : error ? error : ERROR_GEN_FAILURE);
+            return nullptr;
+        }
+        return window;
+    }
+    HWND Create(HWND parent, RECT&, LPARAM parameter = 0) noexcept { return Create(parent, parameter); }
+    INT_PTR DoModal(HWND parent = ::GetActiveWindow(), LPARAM parameter = 0) noexcept {
+        Creation state;
+        if (!BeginCreation(state, true)) return -1;
+        const auto pending = &this->m_thunk.cd;
+        const INT_PTR result = AtlAxDialogBox(_AtlBaseModule.GetResourceInstance(),
+            MAKEINTRESOURCEW(static_cast<T*>(this)->GetIDD()), parent, T::StartDialogProc, parameter);
+        const DWORD error = ::GetLastError();
+        (void)_AtlWinModule.RemoveCreateWndData(pending);
+        if (!state.destroyed) creation_ = nullptr;
+        if (state.error || !state.initialized || result == -1) {
+            ::SetLastError(state.error ? state.error : error ? error : ERROR_GEN_FAILURE); return -1;
+        }
+        return result;
+    }
+    BOOL DestroyWindow() noexcept {
+        if (m_bModal || !::IsWindow(this->m_hWnd)) { ::SetLastError(ERROR_INVALID_WINDOW_HANDLE); return FALSE; }
+        const HRESULT hr = static_cast<T*>(this)->AdviseSinkMap(false);
+        if (hr != S_OK) { ::SetLastError(detail::AxDialogError(FAILED(hr) ? hr : E_UNEXPECTED)); return FALSE; }
+        return ::DestroyWindow(this->m_hWnd);
+    }
+    BOOL EndDialog(int result) noexcept {
+        if (!m_bModal || !::IsWindow(this->m_hWnd)) { ::SetLastError(ERROR_INVALID_WINDOW_HANDLE); return FALSE; }
+        const HRESULT hr = static_cast<T*>(this)->AdviseSinkMap(false);
+        if (hr != S_OK) { ::SetLastError(detail::AxDialogError(FAILED(hr) ? hr : E_UNEXPECTED)); return FALSE; }
+        return ::EndDialog(this->m_hWnd, result);
+    }
+    DLGPROC GetDialogProc() override { return DialogProc; }
+    static INT_PTR CALLBACK DialogProc(HWND context, UINT message, WPARAM w, LPARAM l) {
+        auto self = static_cast<CAxDialogImpl*>(reinterpret_cast<Base*>(context));
+        if (message == WM_INITDIALOG) {
+            if (self->creation_) self->creation_->initialized = true;
+            const HRESULT hr = static_cast<T*>(self)->AdviseSinkMap(true);
+            if (hr != S_OK) {
+                const DWORD error = detail::AxDialogError(FAILED(hr) ? hr : E_UNEXPECTED);
+                if (self->creation_) self->creation_->error = error;
+                if (static_cast<T*>(self)->AdviseSinkMap(false) != S_OK) std::terminate();
+                const HWND window = self->m_hWnd;
+                if (self->m_bModal) ::EndDialog(window, -1); else ::DestroyWindow(window);
+                ::SetLastError(error); return FALSE;
+            }
+        } else if (message == WM_DESTROY) {
+            if (static_cast<T*>(self)->AdviseSinkMap(false) != S_OK) std::terminate();
+        } else if (message == WM_NCDESTROY && self->creation_) {
+            self->creation_->destroyed = true;
+            self->creation_ = nullptr;
+        }
+        // The shared dispatcher owns deferred final notification. Do not
+        // access self after it returns: OnFinalMessage can delete the owner.
+        return Base::DialogProc(context, message, w, l);
+    }
+protected:
+    BOOL m_bModal = FALSE;
+    void OnDialogCreateFailure(HWND window, DWORD error) noexcept override {
+        if (creation_) creation_->error = error;
+        if (m_bModal) ::EndDialog(window, -1); else ::DestroyWindow(window);
+        ::SetLastError(error);
+    }
+};
 
 template<class TBase = CWindow> class CAxWindow2T : public CAxWindowT<TBase> {
 public:

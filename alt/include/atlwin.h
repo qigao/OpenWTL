@@ -2096,8 +2096,9 @@ public:
 
         pThis->m_hWnd = hWnd;
         if (!pThis->m_thunk.Init((WNDPROC)pThis->GetDialogProc(), pThis)) {
+            const DWORD error = ::GetLastError();
             pThis->m_hWnd = NULL;
-            ::SetLastError(ERROR_OUTOFMEMORY);
+            pThis->OnDialogCreateFailure(hWnd, error ? error : ERROR_OUTOFMEMORY);
             return FALSE;
         }
         DLGPROC pProc = (DLGPROC)pThis->m_thunk.GetWndProc();
@@ -2108,8 +2109,7 @@ public:
             const DWORD error = ::GetLastError();
             pThis->m_hWnd = NULL;
             pThis->m_thunk.ReleaseCode();
-            (void)::DestroyWindow(hWnd);
-            ::SetLastError(error);
+            pThis->OnDialogCreateFailure(hWnd, error);
             return FALSE;
         }
         return pProc(hWnd, uMsg, wParam, lParam);
@@ -2173,6 +2173,11 @@ public:
             // OnFinalMessage can delete pThis. Only return the local result.
         }
         return result;
+    }
+protected:
+    virtual void OnDialogCreateFailure(HWND window, DWORD error) noexcept {
+        (void)::DestroyWindow(window);
+        ::SetLastError(error);
     }
 };
 
@@ -2413,6 +2418,7 @@ public:
 };
 
 // Control-hosting definitions are supplied by atlhost.h.
+template<class T, class TBase = CWindow> class CAxDialogImpl;
 template<class TBase> class CAxWindow2T;
 using CAxWindow2 = CAxWindow2T<CWindow>;
 
