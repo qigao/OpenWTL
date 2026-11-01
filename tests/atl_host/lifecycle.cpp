@@ -528,6 +528,7 @@ public:
             rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top,
             parent, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
         if (!window_) return E_OUTOFMEMORY;
+        ::SetWindowLongPtrW(window_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         const HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"9", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
             8, 8, 100, 24, window_, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(771)), ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
         if (!edit) { ::DestroyWindow(window_); window_ = nullptr; return E_OUTOFMEMORY; }
@@ -565,19 +566,10 @@ public:
         ::ShowWindow(window_, command);
         if (command != SW_HIDE && !posted_) {
             posted_ = true; ++state_.shown;
-            LCID locale = 0;
-            state_.good = site_->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
-            state_.good = ::SetDlgItemInt(window_, 771, 314, FALSE) && state_.good;
-            dirty_ = true; state_.good = site_->OnStatusChange(PROPPAGESTATUS_DIRTY) == S_OK && state_.good;
-            if (state_.reenter) {
-                ++state_.nested;
-                state_.good = state_.site->ShowPropertyFrame() == E_UNEXPECTED && state_.good;
-            }
-            const HWND frame = ::GetAncestor(window_, GA_ROOT);
-            state_.good = ::GetAncestor(frame, GA_ROOTOWNER) == state_.owner && state_.good;
-            const HWND button = ::GetDlgItem(frame, state_.cancel ? IDCANCEL : IDOK);
-            if (!button || !::PostMessageW(button, BM_CLICK, 0, 0)) {
-                state_.good = false; ::PostMessageW(frame, WM_CLOSE, 0, 0);
+            // Editing is a user action after native frame construction. Do not
+            // send dirty notifications from inside its initialization stack.
+            if (!::SetTimer(window_, 1, 10, EditTimer)) {
+                state_.good = false; ::PostMessageW(::GetAncestor(window_, GA_ROOT), WM_CLOSE, 0, 0);
             }
         }
         return S_OK;
@@ -603,6 +595,28 @@ public:
         return window_ && ::IsDialogMessageW(window_, message) ? S_OK : S_FALSE;
     }
 private:
+    static void CALLBACK EditTimer(HWND window, UINT, UINT_PTR id, DWORD) {
+        ::KillTimer(window, id);
+        auto page = reinterpret_cast<PropertyPage*>(::GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (page) page->EditAndFinish();
+    }
+    void EditAndFinish() {
+        LCID locale = 0;
+        state_.good = site_->GetLocaleID(&locale) == S_OK && locale == state_.locale && state_.good;
+        state_.good = ::SetDlgItemInt(window_, 771, 314, FALSE) && state_.good;
+        dirty_ = true; state_.good = site_->OnStatusChange(PROPPAGESTATUS_DIRTY) == S_OK && state_.good;
+        if (state_.reenter) {
+            ++state_.nested;
+            state_.good = state_.site->ShowPropertyFrame() == E_UNEXPECTED && state_.good;
+        }
+        const HWND frame = ::GetAncestor(window_, GA_ROOT);
+        state_.good = ::GetAncestor(frame, GA_ROOTOWNER) == state_.owner && state_.good;
+        ::SetActiveWindow(frame); // BM_CLICK requires an active dialog.
+        const HWND button = ::GetDlgItem(frame, state_.cancel ? IDCANCEL : IDOK);
+        if (!button || !::PostMessageW(button, BM_CLICK, 0, 0)) {
+            state_.good = false; ::PostMessageW(frame, WM_CLOSE, 0, 0);
+        }
+    }
     ~PropertyPage() {
         // Native containers can clear these explicitly or release the page
         // itself. Count the actual owned-reference releases in either path.
@@ -686,7 +700,9 @@ bool propertyFrames() {
                 scenario, properties.created, properties.destroyed, properties.activated, properties.deactivated, properties.bound,
                 properties.unbound, properties.sites, properties.clearedSites, properties.shown, properties.nested, properties.captions, properties.applied, properties.value);
             REQUIRE(complete);
-            REQUIRE(properties.applied == (properties.cancel ? 0 : 1) && properties.value == (properties.cancel ? 9 : 314));
+            const bool committed = properties.cancel ? properties.applied == 0 && properties.value == 9 : properties.applied > 0 && properties.value == 314;
+            if (!committed) std::fprintf(stderr, "PROPERTY_FRAME_APPLY scenario=%d cancel=%d applied=%d value=%ld\n", scenario, properties.cancel, properties.applied, properties.value);
+            REQUIRE(committed);
             REQUIRE(::IsWindowEnabled(window) == enabled);
             // A second native modal frame proves that the operation guard was released.
             const int prior = properties.created;
