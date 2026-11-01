@@ -14,6 +14,123 @@ bool RunMicrosoftSafeArrayTests();
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ACTIVEX_FAIL line=%d: %s hr=%08lx\n", __LINE__, #x, static_cast<unsigned long>(::GetLastError())); return false; } } while (0)
 namespace {
 inline constexpr IID EventIID = {0x56b852d1,0xe47c,0x48a6,{0x94,0x1b,0xde,0xae,0x8c,0x6d,0x08,0xfb}};
+inline constexpr CLSID MapPageA = {0xaa4d4e73,0x7789,0x4c87,{0x8f,0x31,0x0a,0x9b,0x29,0x9d,0x22,0x61}};
+inline constexpr CLSID MapPageB = {0xe7f10fc4,0x2d23,0x4d9b,{0x93,0x61,0xfe,0x88,0x44,0x52,0x0f,0x91}};
+CLSID MapPageAlias = MapPageA; // Equal value at a distinct writable address.
+template<class T> class PageMapObject : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                                      public ATL::ISpecifyPropertyPagesImpl<T> {
+public:
+    BEGIN_COM_MAP(PageMapObject<T>)
+        COM_INTERFACE_ENTRY(ISpecifyPropertyPages)
+    END_COM_MAP()
+};
+struct MapPrefix { virtual ~MapPrefix() = default; ULONG padding[3]{}; };
+class MappedPages : public MapPrefix, public PageMapObject<MappedPages> {
+public:
+    BEGIN_PROP_MAP(MappedPages)
+        PROP_PAGE(MapPageB)
+        PROP_ENTRY_TYPE("Width", 11, MapPageA, VT_UI4)
+        PROP_ENTRY_TYPE_EX("Caption", 12, MapPageAlias, IID_IHTMLDocument2, VT_BSTR)
+        PROP_ENTRY("Legacy", 13, MapPageB)
+        PROP_ENTRY_EX("LegacyEx", 14, MapPageA, IID_IDispatch)
+        PROP_ENTRY_TYPE("Unpaged", 15, CLSID_NULL, VT_BOOL)
+        PROP_PAGE(CLSID_NULL)
+    END_PROP_MAP()
+};
+struct DataMap {
+    DWORD prefix = 99;
+    SIZEL extent{123,456};
+    BEGIN_PROP_MAP(DataMap)
+        PROP_DATA_ENTRY("_cx", extent.cx, VT_I4)
+        PROP_DATA_ENTRY("_cy", extent.cy, VT_I4)
+    END_PROP_MAP()
+};
+class DataOnlyPages : public PageMapObject<DataOnlyPages> {
+public:
+    static ATL::_ATL_PROP_ENTRY* GetPropertyMap() noexcept { return DataMap::GetPropertyMap(); }
+};
+class EmptyPages : public PageMapObject<EmptyPages> {
+public:
+    BEGIN_PROP_MAP(EmptyPages)
+    END_PROP_MAP()
+};
+class OnlyPages : public PageMapObject<OnlyPages> {
+public:
+    BEGIN_PROP_MAP(OnlyPages)
+        PROP_PAGE(MapPageA)
+        PROP_PAGE(MapPageB)
+    END_PROP_MAP()
+};
+class FailingPages : public PageMapObject<FailingPages> {
+public:
+    inline static int failure = 0;
+    static ATL::_ATL_PROP_ENTRY* GetPropertyMap() {
+        if (failure == 1) throw ATL::CAtlException(E_ACCESSDENIED);
+        if (failure == 2) throw std::bad_alloc();
+        if (failure == 3) throw std::runtime_error("property-map lookup failure");
+        return failure == 4 ? MappedPages::GetPropertyMap() : nullptr;
+    }
+};
+template<class T> bool CreatePageMap(ATL::CComPtr<ISpecifyPropertyPages>& output) {
+    ATL::CComObject<T>* object = nullptr;
+    CHECK(ATL::CComObject<T>::CreateInstance(&object) == S_OK && object);
+    object->AddRef();
+    const HRESULT hr = object->QueryInterface(IID_ISpecifyPropertyPages, reinterpret_cast<void**>(&output));
+    object->Release(); CHECK(hr == S_OK && output); return true;
+}
+bool propertyMaps() {
+    CHECK(&MapPageAlias != &MapPageA);
+    ATL::CComPtr<ISpecifyPropertyPages> mapped, empty, dataOnly, failing, only;
+    CHECK(CreatePageMap<MappedPages>(mapped) && CreatePageMap<EmptyPages>(empty) &&
+        CreatePageMap<DataOnlyPages>(dataOnly) && CreatePageMap<FailingPages>(failing) && CreatePageMap<OnlyPages>(only));
+    CHECK(mapped->GetPages(nullptr) == E_POINTER);
+    CAUUID first{}, second{};
+    CHECK(mapped->GetPages(&first) == S_OK && first.cElems == 2 && first.pElems &&
+        first.pElems[0] == MapPageB && first.pElems[1] == MapPageA);
+    CHECK(mapped->GetPages(&second) == S_OK && second.cElems == 2 && second.pElems != first.pElems);
+    first.pElems[0] = CLSID_NULL;
+    CHECK(second.pElems[0] == MapPageB && *MappedPages::GetPropertyMap()[0].pclsidPropPage == MapPageB);
+    ::CoTaskMemFree(first.pElems); ::CoTaskMemFree(second.pElems);
+    CHECK(only->GetPages(&first) == S_OK && first.cElems == 2 && first.pElems[0] == MapPageA && first.pElems[1] == MapPageB);
+    ::CoTaskMemFree(first.pElems);
+    for (auto object : {empty.p, dataOnly.p}) {
+        CAUUID pages{99, reinterpret_cast<CLSID*>(static_cast<UINT_PTR>(1))};
+        CHECK(object->GetPages(&pages) == S_OK && !pages.cElems && !pages.pElems);
+    }
+    DataMap record;
+    const auto entries = DataMap::GetPropertyMap();
+    LONG width = 0, height = 0;
+    CHECK(entries[0].dwSizeData == sizeof(width) && entries[1].dwSizeData == sizeof(height));
+    std::memcpy(&width, reinterpret_cast<const BYTE*>(&record) + entries[0].dwOffsetData, sizeof(width));
+    std::memcpy(&height, reinterpret_cast<const BYTE*>(&record) + entries[1].dwOffsetData, sizeof(height));
+    CHECK(width == record.extent.cx && height == record.extent.cy && entries[0].vt == VT_I4 &&
+        !::wcscmp(entries[0].szDesc, L"_cx") && !entries[0].pclsidPropPage && !entries[0].piidDispatch);
+    const auto map = MappedPages::GetPropertyMap();
+    CHECK(map[1].dispid == 11 && map[1].vt == VT_UI4 && *map[1].piidDispatch == IID_IDispatch);
+    CHECK(map[2].dispid == 12 && map[2].vt == VT_BSTR && *map[2].piidDispatch == IID_IHTMLDocument2);
+    CHECK(map[3].vt == VT_EMPTY && map[4].vt == VT_EMPTY);
+    for (int mode = 0; mode < 4; ++mode) {
+        FailingPages::failure = mode;
+        CAUUID pages{99, reinterpret_cast<CLSID*>(static_cast<UINT_PTR>(1))};
+        const HRESULT expected = mode == 1 ? E_ACCESSDENIED : mode == 2 ? E_OUTOFMEMORY : E_UNEXPECTED;
+        CHECK(failing->GetPages(&pages) == expected && !pages.cElems && !pages.pElems);
+    }
+    FailingPages::failure = 4;
+    CHECK(failing->GetPages(&first) == S_OK && first.cElems == 2 && first.pElems[0] == MapPageB);
+    ::CoTaskMemFree(first.pElems);
+    bool correct[2]{true, true};
+    const auto collect = [&](int index) {
+        for (int iteration = 0; iteration < 16; ++iteration) {
+            CAUUID pages{};
+            correct[index] = mapped->GetPages(&pages) == S_OK && pages.cElems == 2 && pages.pElems &&
+                pages.pElems[0] == MapPageB && pages.pElems[1] == MapPageA && correct[index];
+            ::CoTaskMemFree(pages.pElems);
+        }
+    };
+    std::thread a(collect, 0), b(collect, 1); a.join(); b.join();
+    CHECK(correct[0] && correct[1]);
+    return true;
+}
 size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
     const auto first = static_cast<const BYTE*>(value);
     return static_cast<size_t>(std::search(bytes.begin(), bytes.end(), first, first + size) - bytes.begin());
@@ -850,7 +967,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

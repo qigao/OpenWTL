@@ -22,6 +22,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
+| `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Map-driven persistence/browsing remains pending. |
 | `atlcom.h`: `IDispEventImpl` | Native registered/source-provided TypeLib metadata, `SINK_ENTRY`/`SINK_ENTRY_EX`/`SINK_ENTRY_EX_P`, independent sink identities, transactional binding and typed invocation. See TypeLib event scope below. |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
@@ -561,6 +562,52 @@ References: [IDocHostUIHandlerDispatch](https://learn.microsoft.com/en-us/cpp/at
 [native host UI contract](https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa753260(v=vs.85)),
 [MSHTML external object](https://learn.microsoft.com/en-us/previous-versions/aa741462(v=vs.85)).
 
+## Property-map page discovery
+
+ISpecifyPropertyPagesImpl<T> implements native GetPages using the class's static
+GetPropertyMap. Expose ISpecifyPropertyPages in the normal COM map and use
+BEGIN_PROP_MAP/END_PROP_MAP with PROP_PAGE, PROP_ENTRY_TYPE or PROP_ENTRY_TYPE_EX.
+Legacy PROP_ENTRY/PROP_ENTRY_EX retain untyped VT_EMPTY metadata. PROP_DATA_ENTRY
+records a member's compiler-provided offset, size and VARTYPE; nested extent
+members are supported. Offsets/sizes outside DWORD range fail at compilation.
+Descriptors use OLE wide strings; EX entries retain the specified dispatch IID.
+Maps are sentinel-terminated, image-owned source metadata. Their record layout
+is not Microsoft ATL ABI or a persistence wire format; callers must keep the
+map and referenced GUIDs stable while it is being read.
+
+GetPages copies the non-null page CLSIDs, removes duplicates by GUID value and
+keeps their first-declaration order. Direct-data entries and CLSID_NULL do not
+advertise pages. Each successful nonempty call returns an independent native
+CoTaskMem allocation, owned by the caller. Empty/data-only maps return S_OK with
+zero count and a null pointer. Null output storage returns E_POINTER; outputs
+are cleared before lookup/allocation, and a null map returns E_UNEXPECTED.
+Allocation/map exceptions are translated through the existing ATL error path.
+No COM apartment, object factory or registry operation is created by declarations
+or page-list collection. The implementation adds no IUnknown ownership engine;
+normal ATL COM objects provide identity and reference counting.
+
+Existing pre-OLE cases exercise COM-map exposure with multiple inheritance,
+mixed/page-only/data-only/empty maps, value-equal GUIDs at different addresses,
+ordered deduplication, independent writable output arrays, explicit native
+freeing, member offset/size/type and dispatch-IID metadata, failed lookups and
+retry, concurrent collection and unchanged apartment state. The existing native
+property-frame cases also use a mapped control with repeated page declarations
+for actual Apply/Cancel, reopening, LCID/caption and cleanup checks. Executables,
+modes, stdout/stderr contracts, timeout budgets and workflows remain unchanged;
+real printing/hardware HSP remain outside CI and all 36 original blobs and
+whole-application admission are unchanged.
+
+This implements declarations and page discovery. IPersistPropertyBagImpl,
+IPersistStreamInitImpl, IPerPropertyBrowsingImpl, interface-serialization callback
+entries, IPropertyPageImpl, CAxPropertyPageImpl, control splitting and composite
+controls remain unfinished. A property-map declaration alone does not implement
+property access, storage, loading or saving.
+
+References: [ISpecifyPropertyPagesImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ispecifypropertypagesimpl-class),
+[property-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/property-map-macros),
+[page declaration order](https://learn.microsoft.com/en-us/cpp/atl/specifying-property-pages),
+[native GetPages ownership](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ispecifypropertypages-getpages).
+
 ## Native property frames
 
 IOleControlSite::ShowPropertyFrame displays the hosted control's own property
@@ -595,8 +642,9 @@ stdout/stderr contracts, 25-second CTest budgets and workflows are unchanged.
 Real printing and hardware HSP remain outside CI; all 36 pinned Microsoft blobs
 and whole-application admission remain unchanged.
 
-This container feature does not implement IPropertyPageImpl, CAxPropertyPageImpl,
-ATL property-map macros, control splitting or full composite-control behavior.
+Source property-map declarations and page discovery are supported as described
+above. IPropertyPageImpl, CAxPropertyPageImpl, map-driven persistence/browsing,
+control splitting and full composite-control behavior remain unfinished.
 
 References: [IOleControlSite::ShowPropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iolecontrolsite-showpropertyframe),
 [OleCreatePropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/olectl/nf-olectl-olecreatepropertyframe),

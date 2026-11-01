@@ -275,6 +275,7 @@ bool uiHandlers() {
     REQUIRE(module.GetLockCount() == 0);
     return true;
 }
+CLSID MappedNativePageClass{}; // Assigned before registering the native page factory.
 struct PropertyState {
     CLSID pageClass{};
     IOleControlSite* site = nullptr;
@@ -284,6 +285,7 @@ struct PropertyState {
     HRESULT pagesResult = S_OK, activationResult = S_OK;
     bool empty = false, malformed = false, destroyOnQuery = false, destroyOnPages = false;
     bool cancel = false, captionFailure = false, good = true, reenter = true;
+    bool useMap = false;
     int queried = 0, captions = 0, created = 0, destroyed = 0, sites = 0, clearedSites = 0;
     int bound = 0, unbound = 0, activated = 0, deactivated = 0, shown = 0, applied = 0, nested = 0;
     LONG value = 9;
@@ -302,8 +304,14 @@ struct ControlState {
     PropertyState* properties = nullptr;
 };
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
-                public IRunnableObject, public ISpecifyPropertyPages {
+                public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control> {
 public:
+    BEGIN_PROP_MAP(Control)
+        PROP_ENTRY_TYPE("Extent", 1, MappedNativePageClass, VT_I4)
+        PROP_ENTRY_TYPE_EX("ExtentAlias", 2, MappedNativePageClass, IID_IDispatch, VT_I4)
+        PROP_PAGE(MappedNativePageClass)
+        PROP_ENTRY_TYPE("Unpaged", 3, CLSID_NULL, VT_I4)
+    END_PROP_MAP()
     explicit Control(ControlState& state) : state_(state) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
         if (!value) return E_POINTER; *value = nullptr;
@@ -373,18 +381,23 @@ public:
     HRESULT STDMETHODCALLTYPE GetPages(CAUUID* pages) override {
         if (!pages) return E_POINTER;
         auto& properties = *state_.properties; ++properties.queried;
-        *pages = {}; pages->cElems = properties.empty ? 0 : 1;
-        if (!properties.malformed) {
+        HRESULT result = properties.pagesResult;
+        *pages = {};
+        if (properties.useMap) {
+            result = ATL::ISpecifyPropertyPagesImpl<Control>::GetPages(pages);
+            if (FAILED(result)) return result;
+        } else if (!properties.malformed) {
+            pages->cElems = properties.empty ? 0 : 1;
             pages->pElems = static_cast<CLSID*>(::CoTaskMemAlloc(sizeof(CLSID)));
             if (!pages->pElems) return E_OUTOFMEMORY;
             pages->pElems[0] = properties.pageClass;
-        }
+        } else pages->cElems = 1;
         if (properties.reenter) {
             ++properties.nested;
             properties.good = properties.site->ShowPropertyFrame() == E_UNEXPECTED && properties.good;
         }
         if (properties.destroyOnPages) ::DestroyWindow(state_.window);
-        return properties.pagesResult;
+        return result;
     }
     HRESULT STDMETHODCALLTYPE GetExtent(DWORD, SIZEL* size) override {
         if (!storage_) return E_NOTIMPL;
@@ -664,14 +677,16 @@ bool propertyFrames() {
     ATL::CAtlModule module;
     PropertyState properties;
     CLSID pageClass{}; REQUIRE(::CoCreateGuid(&pageClass) == S_OK);
+    MappedNativePageClass = pageClass;
     ATL::CComPtr<IClassFactory> factory; factory.Attach(new PageFactory(properties));
     Registration registration;
     REQUIRE(::CoRegisterClassObject(pageClass, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
-    for (int scenario = 0; scenario < 10; ++scenario) {
+    for (int scenario = 0; scenario < 12; ++scenario) {
         properties = PropertyState{}; properties.pageClass = pageClass;
         properties.empty = scenario == 1; properties.pagesResult = scenario == 2 ? E_ACCESSDENIED : scenario == 6 ? S_FALSE : S_OK;
         properties.malformed = scenario == 3; properties.destroyOnQuery = scenario == 4; properties.destroyOnPages = scenario == 5;
-        properties.cancel = scenario == 8; properties.captionFailure = scenario == 9;
+        properties.cancel = scenario == 8 || scenario == 11; properties.captionFailure = scenario == 9;
+        properties.useMap = scenario >= 10;
         ControlState state; state.properties = scenario == 0 ? nullptr : &properties;
         OwnedWindow<ATL::CAxWindow> window;
         RECT rect{0,0,100,100}; REQUIRE(window.Create(nullptr, &rect, nullptr, WS_POPUP));
