@@ -1,6 +1,7 @@
 // Registered COM factories and actual HWNDs exercise host transaction ordering
 // and reentrant retirement without relying on a particular installed control.
 #include <atlhost.h>
+#include <atlctl.h>
 #include <cstdio>
 #include <new>
 #include <cstring>
@@ -304,7 +305,8 @@ struct ControlState {
     PropertyState* properties = nullptr;
 };
 class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage,
-                public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control> {
+                public IRunnableObject, public ATL::ISpecifyPropertyPagesImpl<Control>,
+                public IDispatch, public ATL::IPerPropertyBrowsingImpl<Control> {
 public:
     BEGIN_PROP_MAP(Control)
         PROP_ENTRY_TYPE("Extent", 1, MappedNativePageClass, VT_I4)
@@ -327,11 +329,26 @@ public:
             *value = static_cast<ISpecifyPropertyPages*>(this);
             if (state_.properties->destroyOnQuery) ::DestroyWindow(state_.window);
         }
+        else if (iid == IID_IDispatch && state_.properties && state_.properties->useMap)
+            *value = static_cast<IDispatch*>(this);
+        else if (iid == IID_IPerPropertyBrowsing && state_.properties && state_.properties->useMap)
+            *value = static_cast<IPerPropertyBrowsing*>(this);
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID member, REFIID iid, LCID, WORD flags, DISPPARAMS* args,
+        VARIANT* result, EXCEPINFO*, UINT*) override {
+        if (iid != IID_NULL) return DISP_E_UNKNOWNINTERFACE;
+        if (!state_.properties || member < 1 || member > 3 || flags != DISPATCH_PROPERTYGET) return DISP_E_MEMBERNOTFOUND;
+        if (!args || !result) return E_POINTER;
+        if (args->cArgs || args->cNamedArgs) return DISP_E_BADPARAMCOUNT;
+        ::VariantInit(result); result->vt = VT_I4; result->lVal = state_.properties->value; return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE SetClientSite(IOleClientSite* site) override {
         if (!site && site_) ++state_.detached;
         if (site && state_.discoverWindow) {
@@ -697,6 +714,14 @@ bool propertyFrames() {
         REQUIRE(ambient->put_LocaleID(properties.locale) == S_OK);
         auto control = new Control(state); properties.identity = static_cast<IOleObject*>(control);
         REQUIRE(window.AttachControl(static_cast<IOleObject*>(control)) == S_OK); control->Release();
+        if (properties.useMap) {
+            ATL::CComPtr<IPerPropertyBrowsing> browser;
+            REQUIRE(properties.identity->QueryInterface(IID_IPerPropertyBrowsing, reinterpret_cast<void**>(&browser)) == S_OK);
+            CLSID mapped{}; REQUIRE(browser->MapPropertyToPage(1, &mapped) == S_OK && mapped == pageClass);
+            BSTR display = nullptr;
+            REQUIRE(browser->GetDisplayString(1, &display) == S_OK && display && !::wcscmp(display, L"9"));
+            ::SysFreeString(display);
+        }
         if (state.properties) REQUIRE(properties.activationResult == E_UNEXPECTED);
         HRESULT foreign = S_OK;
         std::thread thread([&] { foreign = site->ShowPropertyFrame(); }); thread.join();
@@ -712,6 +737,14 @@ bool propertyFrames() {
         const HRESULT expected = scenario == 0 ? E_NOINTERFACE : scenario == 1 ? E_NOTIMPL : scenario == 2 ? E_ACCESSDENIED :
             scenario == 3 || scenario == 6 ? E_UNEXPECTED : scenario == 4 || scenario == 5 ? E_ABORT : S_OK;
         REQUIRE(result == expected && properties.good);
+        if (properties.useMap) {
+            ATL::CComPtr<IPerPropertyBrowsing> browser;
+            REQUIRE(properties.identity->QueryInterface(IID_IPerPropertyBrowsing, reinterpret_cast<void**>(&browser)) == S_OK);
+            BSTR display = nullptr;
+            REQUIRE(browser->GetDisplayString(2, &display) == S_OK && display &&
+                !::wcscmp(display, properties.cancel ? L"9" : L"314"));
+            ::SysFreeString(display);
+        }
         REQUIRE(properties.queried == (scenario == 0 || scenario == 4 ? 0 : 1));
         if (scenario >= 7) {
             const bool complete = properties.created > 0 && properties.created == properties.destroyed && properties.activated > 0 &&

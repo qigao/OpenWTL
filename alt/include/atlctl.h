@@ -14,6 +14,68 @@ __CRT_UUID_DECL(IObjectSafety,0xcb5bdc81,0x93c1,0x11cf,0x8f,0x20,0x00,0x80,0x5f,
 #endif
 
 namespace ATL {
+template<class T>
+class ATL_NO_VTABLE IPerPropertyBrowsingImpl : public IPerPropertyBrowsing {
+public:
+    HRESULT STDMETHODCALLTYPE GetDisplayString(DISPID member, BSTR* output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        try {
+            const _ATL_PROP_ENTRY* map = T::GetPropertyMap();
+            if (!map) return E_UNEXPECTED;
+            IID dispatchId = IID_IDispatch;
+            for (const auto* entry = map; !detail::PropertyMapEnd(*entry); ++entry) {
+                // Page-only and direct-data entries have no Automation member.
+                if (entry->piidDispatch && entry->dispid == member) {
+                    dispatchId = *entry->piidDispatch;
+                    break;
+                }
+            }
+            CComPtr<IDispatch> dispatch;
+            HRESULT hr = this->QueryInterface(dispatchId, reinterpret_cast<void**>(&dispatch.p));
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !dispatch) return E_UNEXPECTED;
+            DISPPARAMS arguments{};
+            CComVariant value, text;
+            hr = dispatch->Invoke(member, IID_NULL, LOCALE_USER_DEFAULT,
+                DISPATCH_PROPERTYGET, &arguments, &value, nullptr, nullptr);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK) return E_UNEXPECTED;
+            hr = ::VariantChangeType(&text, &value, 0, VT_BSTR);
+            if (FAILED(hr)) return hr;
+            *output = text.bstrVal;
+            text.vt = VT_EMPTY; // Transfer the native BSTR, including its length.
+            return S_OK;
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+    HRESULT STDMETHODCALLTYPE MapPropertyToPage(DISPID member, CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = CLSID_NULL;
+        try {
+            const _ATL_PROP_ENTRY* map = T::GetPropertyMap();
+            if (!map) return E_UNEXPECTED;
+            for (const auto* entry = map; !detail::PropertyMapEnd(*entry); ++entry) {
+                if (entry->piidDispatch && entry->dispid == member && entry->pclsidPropPage) {
+                    *output = *entry->pclsidPropPage;
+                    return S_OK;
+                }
+            }
+            return E_INVALIDARG;
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+    HRESULT STDMETHODCALLTYPE GetPredefinedStrings(DISPID, CALPOLESTR* strings,
+                                                    CADWORD* cookies) override {
+        if (strings) *strings = {};
+        if (cookies) *cookies = {};
+        return strings && cookies ? S_OK : E_POINTER;
+    }
+    HRESULT STDMETHODCALLTYPE GetPredefinedValue(DISPID, DWORD, VARIANT* output) override {
+        if (!output) return E_POINTER;
+        ::VariantInit(output); // An [out] VARIANT is not caller-owned input.
+        return E_NOTIMPL;
+    }
+};
+
 template<class T, class CDV = CComDynamicUnkArray>
 class IPropertyNotifySinkCP : public IConnectionPointImpl<T, &IID_IPropertyNotifySink, CDV> {};
 

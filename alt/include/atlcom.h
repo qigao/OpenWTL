@@ -886,7 +886,7 @@ HRESULT QueryAutoAggregate(Owner* owner, CComPtr<IUnknown>& cache, REFCLSID clsi
 } // namespace detail
 } // namespace ATL
 
-// Property declarations expose metadata to the native page-list helper. No
+// Property declarations expose metadata to page-list and browsing helpers. No
 // persistence, object activation or COM initialization occurs in these maps.
 #define BEGIN_PROP_MAP(theClass) \
 public: \

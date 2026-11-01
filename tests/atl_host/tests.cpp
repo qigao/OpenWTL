@@ -1,4 +1,5 @@
 #include <atlhost.h>
+#include <atlctl.h>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -129,6 +130,172 @@ bool propertyMaps() {
     };
     std::thread a(collect, 0), b(collect, 1); a.join(); b.join();
     CHECK(correct[0] && correct[1]);
+    return true;
+}
+inline constexpr IID BrowseAlternateIID = {0xca8dc074,0x99d7,0x43d0,{0xa6,0x72,0x08,0xf5,0x3f,0x96,0x22,0xc1}};
+inline constexpr IID BrowseMissingIID = {0x6fcfdc61,0x5160,0x4db2,{0xad,0x26,0xf9,0x39,0x84,0xce,0x30,0x18}};
+struct BrowsingMap {
+    LONG data = 0;
+    BEGIN_PROP_MAP(BrowsingMap)
+        PROP_PAGE(MapPageB)
+        PROP_DATA_ENTRY("Internal", data, VT_I4)
+        PROP_ENTRY_TYPE("Default", DISPID_VALUE, MapPageA, VT_I4)
+        PROP_ENTRY_TYPE("Number", 11, MapPageA, VT_I4)
+        PROP_ENTRY_TYPE_EX("Text", 12, MapPageB, BrowseAlternateIID, VT_BSTR)
+        PROP_ENTRY_EX("Missing interface", 13, MapPageA, BrowseMissingIID)
+        PROP_ENTRY_TYPE("Unpaged", 14, CLSID_NULL, VT_BOOL)
+        PROP_ENTRY_TYPE_EX("First", 15, MapPageA, BrowseAlternateIID, VT_BSTR)
+        PROP_ENTRY("Second", 15, MapPageB)
+        PROP_ENTRY("Negative", -77, MapPageB)
+    END_PROP_MAP()
+};
+struct BrowsingState {
+    int calls[2]{}, failure = 0, destroyed = 0;
+    LONG number = 314;
+    bool valid = true, reenter = false;
+    IPerPropertyBrowsing* browser = nullptr; // Borrowed for the synchronous call.
+    IUnknown* probe = nullptr;
+};
+template<class T, int Which> class BrowsingDispatch : public IDispatch {
+public:
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID member, REFIID iid, LCID locale, WORD flags,
+        DISPPARAMS* args, VARIANT* result, EXCEPINFO*, UINT*) override {
+        auto& state = static_cast<T*>(this)->state;
+        ++state->calls[Which];
+        state->valid = state->valid && iid == IID_NULL && locale == LOCALE_USER_DEFAULT &&
+            flags == DISPATCH_PROPERTYGET && args && !args->cArgs && !args->cNamedArgs &&
+            !args->rgvarg && !args->rgdispidNamedArgs && result && result->vt == VT_EMPTY;
+        if (!result) return E_POINTER;
+        if (state->reenter) {
+            CLSID page{};
+            state->valid = state->valid && state->browser->MapPropertyToPage(12, &page) == S_OK && page == MapPageB;
+        }
+        if (state->failure) {
+            result->vt = VT_UNKNOWN; result->punkVal = state->probe; state->probe->AddRef();
+            if (state->failure == 1) return E_ACCESSDENIED;
+            if (state->failure == 2) return S_FALSE;
+            if (state->failure == 3) throw ATL::CAtlException(E_ABORT);
+            if (state->failure == 4) throw std::bad_alloc();
+            if (state->failure == 5) throw std::runtime_error("browsing callback failure");
+            return S_OK; // Native conversion of this non-Automation object fails.
+        }
+        if (member == 12 || member == 15) {
+            const WCHAR text[] = {L'A', 0, L'B'};
+            result->vt = VT_BSTR; result->bstrVal = ::SysAllocStringLen(text, 3);
+            return result->bstrVal ? S_OK : E_OUTOFMEMORY;
+        }
+        if (member == 14) { result->vt = VT_BOOL; result->boolVal = VARIANT_TRUE; return S_OK; }
+        if (member == -77) { result->vt = VT_I4 | VT_BYREF; result->plVal = &state->number; return S_OK; }
+        if (member == DISPID_VALUE || member == 11 || member == 99) {
+            result->vt = VT_I4; result->lVal = state->number; return S_OK;
+        }
+        return DISP_E_MEMBERNOTFOUND;
+    }
+};
+class BrowsingObject : public MapPrefix, public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                       public BrowsingDispatch<BrowsingObject, 0>, public BrowsingDispatch<BrowsingObject, 1>,
+                       public ATL::IPerPropertyBrowsingImpl<BrowsingObject> {
+public:
+    using DefaultDispatch = BrowsingDispatch<BrowsingObject, 0>;
+    using AlternateDispatch = BrowsingDispatch<BrowsingObject, 1>;
+    inline static int mapFailure = 0;
+    BrowsingState* state = nullptr;
+    ~BrowsingObject() { if (state) ++state->destroyed; }
+    static ATL::_ATL_PROP_ENTRY* GetPropertyMap() {
+        if (mapFailure == 1) throw ATL::CAtlException(E_ACCESSDENIED);
+        if (mapFailure == 2) throw std::bad_alloc();
+        if (mapFailure == 3) throw std::runtime_error("browsing map failure");
+        return mapFailure == 4 ? nullptr : BrowsingMap::GetPropertyMap();
+    }
+    BEGIN_COM_MAP(BrowsingObject)
+        COM_INTERFACE_ENTRY(IPerPropertyBrowsing)
+        COM_INTERFACE_ENTRY2(IDispatch, DefaultDispatch)
+        COM_INTERFACE_ENTRY2_IID(BrowseAlternateIID, IDispatch, AlternateDispatch)
+    END_COM_MAP()
+};
+bool propertyBrowsing() {
+    BrowsingState state;
+    ATL::CComObject<BrowsingObject>* object = nullptr;
+    CHECK(ATL::CComObject<BrowsingObject>::CreateInstance(&object) == S_OK && object);
+    object->state = &state; object->AddRef();
+    ATL::CComPtr<IPerPropertyBrowsing> browser;
+    CHECK(object->QueryInterface(IID_IPerPropertyBrowsing, reinterpret_cast<void**>(&browser)) == S_OK);
+    object->Release(); state.browser = browser;
+    ATL::CComPtr<ISpecifyPropertyPages> probe;
+    CHECK(CreatePageMap<EmptyPages>(probe)); state.probe = probe;
+    ATL::CComPtr<IUnknown> identity, defaultIdentity, alternateIdentity;
+    ATL::CComPtr<IDispatch> primary, alternate;
+    CHECK(browser->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity)) == S_OK);
+    CHECK(browser->QueryInterface(IID_IDispatch, reinterpret_cast<void**>(&primary)) == S_OK &&
+        browser->QueryInterface(BrowseAlternateIID, reinterpret_cast<void**>(&alternate)) == S_OK && primary.p != alternate.p);
+    CHECK(primary->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&defaultIdentity)) == S_OK &&
+        alternate->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&alternateIdentity)) == S_OK &&
+        identity.p == defaultIdentity.p && identity.p == alternateIdentity.p);
+    CLSID page{};
+    CHECK(browser->MapPropertyToPage(11, nullptr) == E_POINTER);
+    for (DISPID member : {DISPID(DISPID_VALUE), DISPID(11), DISPID(13), DISPID(15)})
+        CHECK(browser->MapPropertyToPage(member, &page) == S_OK && page == MapPageA);
+    CHECK(browser->MapPropertyToPage(12, &page) == S_OK && page == MapPageB);
+    CHECK(browser->MapPropertyToPage(-77, &page) == S_OK && page == MapPageB);
+    CHECK(browser->MapPropertyToPage(14, &page) == S_OK && page == CLSID_NULL);
+    page = MapPageA;
+    CHECK(browser->MapPropertyToPage(99, &page) == E_INVALIDARG && page == CLSID_NULL);
+    CHECK(browser->GetDisplayString(11, nullptr) == E_POINTER);
+    BSTR text = nullptr, second = nullptr;
+    for (DISPID member : {DISPID(DISPID_VALUE), DISPID(11), DISPID(-77), DISPID(99)}) {
+        CHECK(browser->GetDisplayString(member, &text) == S_OK && text && !::wcscmp(text, L"314"));
+        ::SysFreeString(text);
+    }
+    for (DISPID member : {DISPID(12), DISPID(15)}) {
+        CHECK(browser->GetDisplayString(member, &text) == S_OK && text && ::SysStringLen(text) == 3 &&
+            text[0] == L'A' && !text[1] && text[2] == L'B');
+        CHECK(browser->GetDisplayString(member, &second) == S_OK && second != text);
+        text[0] = L'Z'; CHECK(second[0] == L'A');
+        ::SysFreeString(text); ::SysFreeString(second);
+    }
+    CHECK(state.calls[0] == 4 && state.calls[1] == 4);
+    ATL::CComVariant boolean, expected;
+    boolean.vt = VT_BOOL; boolean.boolVal = VARIANT_TRUE;
+    CHECK(::VariantChangeType(&expected, &boolean, 0, VT_BSTR) == S_OK);
+    CHECK(browser->GetDisplayString(14, &text) == S_OK && !::wcscmp(text, expected.bstrVal));
+    ::SysFreeString(text);
+    for (DISPID member : {DISPID(13), DISPID(1000)}) {
+        text = reinterpret_cast<BSTR>(static_cast<UINT_PTR>(1));
+        CHECK(browser->GetDisplayString(member, &text) == (member == 13 ? E_NOINTERFACE : DISP_E_MEMBERNOTFOUND) && !text);
+    }
+    const HRESULT failures[] = {E_ACCESSDENIED, E_UNEXPECTED, E_ABORT, E_OUTOFMEMORY, E_UNEXPECTED};
+    for (int mode = 1; mode <= 6; ++mode) {
+        state.failure = mode; text = reinterpret_cast<BSTR>(static_cast<UINT_PTR>(1));
+        const HRESULT hr = browser->GetDisplayString(11, &text);
+        CHECK((mode <= 5 ? hr == failures[mode - 1] : FAILED(hr)) && !text);
+        CHECK(probe->AddRef() == 2 && probe->Release() == 1); // Result VARIANT releases even on failure/throw.
+    }
+    state.failure = 0; state.reenter = true; state.number = 271;
+    CHECK(browser->GetDisplayString(11, &text) == S_OK && !::wcscmp(text, L"271"));
+    ::SysFreeString(text); CHECK(state.valid);
+    for (int mode = 1; mode <= 4; ++mode) {
+        BrowsingObject::mapFailure = mode; page = MapPageA; text = reinterpret_cast<BSTR>(static_cast<UINT_PTR>(1));
+        const HRESULT hr = mode == 1 ? E_ACCESSDENIED : mode == 2 ? E_OUTOFMEMORY : E_UNEXPECTED;
+        CHECK(browser->MapPropertyToPage(11, &page) == hr && page == CLSID_NULL);
+        CHECK(browser->GetDisplayString(11, &text) == hr && !text);
+    }
+    BrowsingObject::mapFailure = 0;
+    CALPOLESTR strings{99, reinterpret_cast<LPOLESTR*>(static_cast<UINT_PTR>(1))};
+    CADWORD cookies{99, reinterpret_cast<DWORD*>(static_cast<UINT_PTR>(1))};
+    CHECK(browser->GetPredefinedStrings(11, &strings, &cookies) == S_OK && !strings.cElems && !strings.pElems && !cookies.cElems && !cookies.pElems);
+    cookies.cElems = 99;
+    CHECK(browser->GetPredefinedStrings(11, nullptr, &cookies) == E_POINTER && !cookies.cElems && !cookies.pElems);
+    strings.cElems = 99;
+    CHECK(browser->GetPredefinedStrings(11, &strings, nullptr) == E_POINTER && !strings.cElems && !strings.pElems);
+    CHECK(browser->GetPredefinedStrings(11, nullptr, nullptr) == E_POINTER);
+    VARIANT value; std::memset(&value, 0xCD, sizeof(value));
+    CHECK(browser->GetPredefinedValue(11, 1, &value) == E_NOTIMPL && value.vt == VT_EMPTY);
+    CHECK(browser->GetPredefinedValue(11, 1, nullptr) == E_POINTER);
+    primary.Release(); alternate.Release(); identity.Release(); defaultIdentity.Release(); alternateIdentity.Release(); browser.Release();
+    CHECK(state.destroyed == 1);
     return true;
 }
 size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
@@ -967,7 +1134,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
