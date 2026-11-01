@@ -10,6 +10,7 @@
 
 bool RunAtlSafeArrayTests();
 bool RunAtlConnectionPointTests();
+bool RunAtlPropertyNotifyTests();
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ATL_COMPAT_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
@@ -1157,6 +1158,7 @@ bool RunAtlCompatibilityTests() {
     CHECK(PolyObjects());
     CHECK(RunAtlSafeArrayTests());
     CHECK(RunAtlConnectionPointTests());
+    CHECK(RunAtlPropertyNotifyTests());
     CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());

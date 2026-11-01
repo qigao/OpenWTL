@@ -1,4 +1,4 @@
-#include <atlcom.h>
+#include <atlctl.h>
 #include <openatl/com_registration.h>
 #include "interfaces.h"
 #include "fixture_registry_ids.h"
@@ -15,20 +15,25 @@ HRESULT registerFixture(BOOL installing) noexcept;
 // continues to use the same OpenATL::COM::Module factory/owner engine.
 class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public ATL::CComCoClass<Value, &CLSID_OpenATLValue>,
-              public IOpenATLDerived, public IOpenATLSecond,
+              public IOpenATLDerived, public IOpenATLSecond, public IOpenATLProperty,
               public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue>,
               public ATL::IConnectionPointContainerImpl<Value>,
-              public ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents> {
+              public ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents>,
+              public ATL::IPropertyNotifySinkCP<Value> {
+    using ValueEvents = ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents>;
+    std::atomic<LONG> property_{17};
 public:
     DECLARE_POLY_AGGREGATABLE(Value)
     BEGIN_COM_MAP(Value)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLDerived, IOpenATLDerived)
         COM_INTERFACE_ENTRY2_IID(IID_OpenATLValue, IOpenATLValue, IOpenATLDerived)
         COM_INTERFACE_ENTRY_IID(IID_OpenATLSecond, IOpenATLSecond)
+        COM_INTERFACE_ENTRY_IID(IID_OpenATLProperty, IOpenATLProperty)
         COM_INTERFACE_ENTRY(ISupportErrorInfo)
         COM_INTERFACE_ENTRY(IConnectionPointContainer)
     END_COM_MAP()
     BEGIN_CONNECTION_POINT_MAP(Value)
+        CONNECTION_POINT_ENTRY(IID_IPropertyNotifySink)
         CONNECTION_POINT_ENTRY(IID_OpenATLValueEvents)
     END_CONNECTION_POINT_MAP()
     DECLARE_REGISTRY_RESOURCEID(IDR_OPENATL_VALUE)
@@ -36,7 +41,7 @@ public:
         if (!value) return Error(UINT(IDS_OPENATL_ERROR), 711, L"fixture-help.chm", IID_OpenATLValue, E_POINTER);
         *value = 42;
         ATL::CComPtr<IEnumConnections> snapshot;
-        HRESULT hr = EnumConnections(&snapshot.p);
+        HRESULT hr = ValueEvents::EnumConnections(&snapshot.p);
         if (FAILED(hr)) return hr;
         for (;;) {
             CONNECTDATA data{};
@@ -58,6 +63,16 @@ public:
         if (!value) return E_POINTER;
         *value = 99;
         return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_Property(LONG* value) noexcept override {
+        if (!value) return E_POINTER;
+        *value = property_.load(); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE put_Property(LONG value) noexcept override {
+        const HRESULT hr = ATL::CFirePropNotifyEvent::FireOnRequestEdit(GetUnknown(), DISPID_OpenATLProperty);
+        if (hr != S_OK) return hr;
+        property_ = value;
+        return ATL::CFirePropNotifyEvent::FireOnChanged(GetUnknown(), DISPID_OpenATLProperty);
     }
 };
 OBJECT_ENTRY_AUTO(CLSID_OpenATLValue, Value)

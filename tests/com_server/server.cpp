@@ -28,6 +28,7 @@ using namespace OpenATL::COM;
 
 bool RunAtlCompatibilityTests();
 bool RunDllConnectionPointTests(IOpenATLValue* object, IEnumConnections** retained);
+bool RunDllPropertyNotifyTests(IOpenATLValue* object);
 bool RunAtlAutoAggregateTests(bool multiThreaded);
 bool RunAtlErrorInfoTests();
 bool RunAtlDispatchTests();
@@ -417,6 +418,7 @@ bool aggregateDll(Dll& dll, bool nativeCom) {
     LONG result = 0;
     REQUIRE(value->GetValue(&result) == S_OK && result == 42);
     REQUIRE(RunDllConnectionPointTests(value.p, nullptr));
+    REQUIRE(RunDllPropertyNotifyTests(value.p));
     ATL::CComPtr<IOpenATLSecond> second;
     REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && outer.refs == 3);
     REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
@@ -1709,6 +1711,7 @@ bool native(DWORD apartment) {
             IID_OpenATLValue, reinterpret_cast<void**>(&eventObject.p)) == S_OK);
         ATL::CComPtr<IEnumConnections> snapshot, clone;
         REQUIRE(RunDllConnectionPointTests(eventObject.p, &snapshot.p));
+        REQUIRE(RunDllPropertyNotifyTests(eventObject.p));
         REQUIRE(snapshot->Clone(&clone.p) == S_OK);
         eventObject.Release();
         ::CoFreeUnusedLibrariesEx(0, 0);
