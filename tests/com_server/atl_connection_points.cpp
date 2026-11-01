@@ -59,6 +59,26 @@ public:
         CONNECTION_POINT_ENTRY(EventsIID)
     END_CONNECTION_POINT_MAP()
 };
+class OverrideSource : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                       public ATL::IConnectionPointContainerImpl<OverrideSource>,
+                       public ATL::IConnectionPointImpl<OverrideSource, &EventsIID> {
+    using Point = ATL::IConnectionPointImpl<OverrideSource, &EventsIID>;
+public:
+    int advises = 0, unadvises = 0;
+    bool fail = false;
+    BEGIN_COM_MAP(OverrideSource)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+    END_COM_MAP()
+    BEGIN_CONNECTION_POINT_MAP(OverrideSource)
+        CONNECTION_POINT_ENTRY(EventsIID)
+    END_CONNECTION_POINT_MAP()
+    STDMETHOD(Advise)(IUnknown* sink, DWORD* cookie) override {
+        ++advises;
+        if (fail) { if (cookie) *cookie = 99; throw ATL::CAtlException(E_ACCESSDENIED); }
+        return Point::Advise(sink, cookie);
+    }
+    STDMETHOD(Unadvise)(DWORD cookie) override { ++unadvises; return Point::Unadvise(cookie); }
+};
 template<class T> bool Make(ATL::CComPtr<ATL::CComObject<T>>& result) {
     ATL::CComObject<T>* raw = nullptr;
     CP_CHECK(ATL::CComObject<T>::CreateInstance(&raw) == S_OK && raw);
@@ -225,6 +245,14 @@ bool MapsAndFailures() {
     CP_CHECK(failure->FindConnectionPoint(EventsIID, &failedPoint.p) == S_OK);
     cookie = 91;
     CP_CHECK(failedPoint->Advise(static_cast<IPersist*>(&sink), &cookie) == E_OUTOFMEMORY && !cookie && sink.refs == 1);
+    ATL::CComPtr<ATL::CComObject<OverrideSource>> custom; CP_CHECK(Make(custom));
+    ATL::CComPtr<IConnectionPoint> customPoint;
+    CP_CHECK(custom->FindConnectionPoint(EventsIID, &customPoint.p) == S_OK);
+    custom->fail = true; cookie = 91;
+    CP_CHECK(customPoint->Advise(static_cast<IPersist*>(&sink), &cookie) == E_ACCESSDENIED && !cookie && sink.refs == 1);
+    custom->fail = false;
+    CP_CHECK(customPoint->Advise(static_cast<IPersist*>(&sink), &cookie) == S_OK && custom->advises == 2 && sink.refs == 2);
+    CP_CHECK(customPoint->Unadvise(cookie) == S_OK && custom->unadvises == 1 && sink.refs == 1);
     return true;
 }
 bool SnapshotsAndLifetime() {

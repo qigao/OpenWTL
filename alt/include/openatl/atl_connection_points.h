@@ -190,12 +190,29 @@ class IConnectionPointImpl : public _ICPLocator<InterfaceId> {
         }
         ULONG STDMETHODCALLTYPE AddRef() noexcept override { return point_.Container()->AddRef(); }
         ULONG STDMETHODCALLTYPE Release() noexcept override { return point_.Container()->Release(); }
-        HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) noexcept override { return point_.GetConnectionInterface(output); }
-        HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) noexcept override { return point_.GetConnectionPointContainer(output); }
-        HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) noexcept override { return point_.Advise(sink, cookie); }
-        HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) noexcept override { return point_.Unadvise(cookie); }
-        HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections** output) noexcept override { return point_.EnumConnections(output); }
+        HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) noexcept override {
+            return Forward([&] { return point_.GetConnectionInterface(output); });
+        }
+        HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) noexcept override {
+            return Forward([&] { return point_.GetConnectionPointContainer(output); });
+        }
+        HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) noexcept override {
+            if (cookie) *cookie = 0;
+            const HRESULT hr = Forward([&] { return point_.Advise(sink, cookie); });
+            if (FAILED(hr) && cookie) *cookie = 0;
+            return hr;
+        }
+        HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) noexcept override {
+            return Forward([&] { return point_.Unadvise(cookie); });
+        }
+        HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections** output) noexcept override {
+            if (output) *output = nullptr;
+            return Forward([&] { return point_.EnumConnections(output); });
+        }
     private:
+        template<class Call> static HRESULT Forward(Call&& call) noexcept {
+            try { return call(); } catch (...) { return detail::AtlObjectException(); }
+        }
         IConnectionPointImpl& point_;
     } face_{*this};
     T* Owner() noexcept { return static_cast<T*>(this); }
@@ -210,16 +227,16 @@ public:
             if (IUnknown* sink = std::exchange(*slot, nullptr)) sink->Release();
     }
     IConnectionPoint* GetConnPoint() noexcept override { return &face_; }
-    HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) noexcept {
+    virtual HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) {
         if (!output) return E_POINTER;
         *output = *InterfaceId; return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) noexcept {
+    virtual HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) {
         if (!output) return E_POINTER;
         *output = nullptr;
         return Container()->QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(output));
     }
-    HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) noexcept {
+    virtual HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) {
         if (!cookie) return E_POINTER;
         *cookie = 0;
         if (!sink) return E_POINTER;
@@ -235,7 +252,7 @@ public:
             return S_OK;
         } catch (...) { return detail::AtlObjectException(); }
     }
-    HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) noexcept {
+    virtual HRESULT STDMETHODCALLTYPE Unadvise(DWORD cookie) {
         CComPtr<IUnknown> protect(GetConnPoint()), removed;
         {
             detail::TearOffOwnerLock<T> lock(*Owner());
@@ -245,7 +262,7 @@ public:
         }
         return S_OK; // Release the removed sink after dropping the owner lock.
     }
-    HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections** output) noexcept {
+    virtual HRESULT STDMETHODCALLTYPE EnumConnections(IEnumConnections** output) {
         if (!output) return E_POINTER;
         *output = nullptr;
         try {

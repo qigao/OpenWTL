@@ -333,7 +333,9 @@ Advise queries the exact outgoing interface and owns that reference until
 Unadvise or owner destruction. Failed Advise clears the cookie; missing sink
 interfaces, fixed-capacity limits and invalid disconnects return actual errors.
 Owner Lock/Unlock serializes connection changes. Sink QI and the final Release
-of a disconnected sink occur outside that lock. The public m_vec supports
+of a disconnected sink occur outside that lock. Standard STDMETHOD overrides
+of point methods are dispatched through the native face; thrown ATL/allocation/
+unexpected exceptions become HRESULT failures at that COM boundary. The public m_vec supports
 generated-proxy-style indexed/range access; callers must use the owner's lock
 and retain interfaces before invoking them outside the lock. Firing policy is
 the proxy/application's responsibility; these templates do not invent events.
