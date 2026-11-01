@@ -378,6 +378,62 @@ public:
     }
 };
 
+template<class T>
+class ATL_NO_VTABLE IPersistStorageImpl : public IPersistStorage {
+    template<class Action>
+    HRESULT WithStream(IStorage* storage, Action action) {
+        try {
+            CComPtr<IPersistStorage> self(this);
+            CComPtr<IStorage> medium(storage);
+            CComPtr<IPersistStreamInit> codec;
+            const HRESULT hr = self->QueryInterface(IID_IPersistStreamInit,
+                reinterpret_cast<void**>(&codec.p));
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !codec) return E_UNEXPECTED;
+            return action(codec.p, medium.p);
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+public:
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = CLSID_NULL;
+        try { *output = T::GetObjectCLSID(); return S_OK; }
+        catch (...) { return detail::AtlObjectException(); }
+    }
+    HRESULT STDMETHODCALLTYPE IsDirty() override {
+        return WithStream(nullptr, [](IPersistStreamInit* codec, IStorage*) { return codec->IsDirty(); });
+    }
+    HRESULT STDMETHODCALLTYPE InitNew(IStorage* storage) override {
+        if (!storage) return E_POINTER;
+        return WithStream(storage, [](IPersistStreamInit* codec, IStorage*) { return codec->InitNew(); });
+    }
+    HRESULT STDMETHODCALLTYPE Load(IStorage* storage) override {
+        if (!storage) return E_POINTER;
+        return WithStream(storage, [](IPersistStreamInit* codec, IStorage* medium) {
+            CComPtr<IStream> stream;
+            const HRESULT hr = medium->OpenStream(L"Contents", nullptr,
+                STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &stream.p);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !stream) return E_UNEXPECTED;
+            return codec->Load(stream.p);
+        });
+    }
+    HRESULT STDMETHODCALLTYPE Save(IStorage* storage, BOOL sameAsLoad) override {
+        if (!storage) return E_POINTER;
+        return WithStream(storage, [sameAsLoad](IPersistStreamInit* codec, IStorage* medium) {
+            CComPtr<IStream> stream;
+            const HRESULT hr = medium->CreateStream(L"Contents",
+                STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, 0, &stream.p);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !stream) return E_UNEXPECTED;
+            return codec->Save(stream.p, sameAsLoad);
+        });
+    }
+    // Stateless ATL defaults: no storage/stream is kept between calls.
+    HRESULT STDMETHODCALLTYPE SaveCompleted(IStorage*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE HandsOffStorage() override { return S_OK; }
+};
+
 template<class Base>
 class CComObject : private detail::AtlObjectModulePin, public Base {
 public:

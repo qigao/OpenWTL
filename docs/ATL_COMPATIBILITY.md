@@ -24,6 +24,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
 | `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Stream persistence remains pending. |
 | `atlcom.h`: `IPersistPropertyBagImpl<T>` | Caller-supplied IPropertyBag loading/saving through real Automation properties and checked scalar direct-data entries, EX dispatch IIDs, native VARIANT copying/conversion, dirty-state completion and optional IErrorLog. See property-bag persistence below. |
+| `atlcom.h`: `IPersistStorageImpl<T>` | Native IStorage Contents stream adapter to the object's queried IPersistStreamInit; InitNew/IsDirty delegation, full stream replacement and stateless SaveCompleted/HandsOffStorage defaults. The stream codec and full OLE container lifecycle remain separate. |
 | `atlctl.h`: `IPerPropertyBrowsingImpl<T>` | DISPID-to-page mapping, native Automation display strings with EX-interface selection, empty default predefined lists and E_NOTIMPL predefined values. See per-property browsing below. |
 | `atlcom.h`: `IDispEventImpl` | Native registered/source-provided TypeLib metadata, `SINK_ENTRY`/`SINK_ENTRY_EX`/`SINK_ENTRY_EX_P`, independent sink identities, transactional binding and typed invocation. See TypeLib event scope below. |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
@@ -715,7 +716,7 @@ last outside object reference. The latter checks destruction only after the
 successful dirty update. No test mode, executable, registration, workflow,
 timeout or stderr allowance is added. COM initialization remains caller-owned.
 
-Stream/storage persistence mixins, global persistence helper APIs, arbitrary
+The property-map stream persistence mixin, global persistence helper APIs, arbitrary
 direct-data serialization, interface-serialization callback entries, full property
 page classes and complete original-application qualification remain pending.
 The 36 pinned original blobs, all 37 whole-application admission gates and real
@@ -725,6 +726,61 @@ References: [IPersistPropertyBagImpl](https://learn.microsoft.com/en-us/cpp/atl/
 [native Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersistpropertybag-load),
 [native Save](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersistpropertybag-save),
 [IPropertyBag::Read](https://learn.microsoft.com/en-us/windows/win32/api/oaidl/nf-oaidl-ipropertybag-read).
+
+## Storage-to-stream persistence
+
+IPersistStorageImpl<T> in atlcom.h adapts the native IPersistStorage interface to
+an IPersistStreamInit implementation exposed by the object's ordinary COM map.
+T supplies GetObjectCLSID; the storage and stream interfaces share the object's
+existing controlling identity and reference counts. The adapter queries the
+stream interface on each operation, so applications can supply their own native
+stream codec independently of the still-pending IPersistStreamInitImpl property-map
+serializer. GetClassID uses T's CLSID and clears failed output; null output/media
+addresses return E_POINTER. Missing stream support propagates E_NOINTERFACE;
+non-S_OK or null successful QI results return E_UNEXPECTED.
+
+InitNew delegates to the stream's InitNew without creating a Contents stream.
+IsDirty preserves the stream implementation's HRESULT, including S_OK/S_FALSE.
+Load opens Contents read-only with exclusive sharing and passes its freshly
+opened stream at position zero to IPersistStreamInit::Load. Save creates/replaces
+Contents with native STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE and
+passes fSameAsLoad as the stream's clear-dirty request. A shorter replacement
+therefore has no old tail; copy saves (FALSE) preserve dirty state when the codec
+honors that request. QI is completed before opening/replacing a stream, so absent
+codec support cannot truncate existing data. Actual stream/storage/codec failures
+propagate, and exceptions use the existing ATL translation. Dirty-state changes
+and byte encoding are owned by the stream codec, not duplicated in this adapter.
+
+The object, supplied storage and queried codec are retained for the complete
+operation. Native stream references are released on success, failure and
+exceptions, including callbacks that drop the last outside object reference.
+No storage/stream pointer is cached across calls. SaveCompleted and HandsOffStorage
+are stateless S_OK defaults, as documented for ATL; they neither reopen a storage
+nor implement a child-object/NoScribble state machine. An application requiring
+retained/incremental storage, nested objects or the full OLE container lifecycle
+must override those policies. Save does not write the storage CLSID or call
+IStorage::Commit: the caller or native OleSave owns those steps. Native storage
+replacement is not a rollback transaction; failed codec writes can leave partial
+Contents until the caller reverts or retries. No compound-file engine, wire format,
+object activation or COM apartment is introduced here.
+
+Existing lifecycle cases use Windows CreateILockBytesOnHGlobal and
+StgCreateDocfileOnILockBytes/StgOpenStorageOnILockBytes with actual native
+transacted compound storage. They cover adjusted COM pointers/identity,
+InitNew and duplicate initialization, missing Contents, round trips, dirty/copy
+flags, replacement truncation, sibling preservation, native OleSave/class metadata,
+Revert proving no implicit Commit, caller Commit/reopen, read-only denial before
+codec Save, absent/malformed QI, codec HRESULTs/exceptions and retry. Reopening
+exclusive storage while both objects remain alive proves no medium/stream cache;
+a codec callback dropping the last outside reference verifies call lifetime.
+The existing lifecycle executable/mode, timeout, stdout/stderr and workflows
+remain unchanged. All 36 pinned blobs and 37 whole-application admission gates
+remain intact; real printing/hardware HSP remain excluded from CI.
+
+References: [IPersistStorageImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ipersiststorageimpl-class),
+[native Save responsibilities](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-save),
+[native CreateStream replacement](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-istorage-createstream),
+[full SaveCompleted lifecycle](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-savecompleted).
 
 ## Native property frames
 
