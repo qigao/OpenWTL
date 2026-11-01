@@ -44,10 +44,13 @@ It invokes typed member functions directly rather than interpreting the
 compiler-specific member-pointer layout. Maps support up to eight arguments.
 
 IDispEventImpl obtains native FUNCDESC parameter metadata from registered
-TypeLibs or IProvideClassInfo2 source discovery and uses the same typed handler
+TypeLibs or source discovery through IProvideClassInfo2, IProvideClassInfo, or
+IDispatch/IPersist and uses the same typed handler
 path. Source binding owns metadata per connection; failed subscriptions roll
 back, and failed explicit Unadvise retains the binding for retry. The existing
 WebBrowser admission uses the native DocumentComplete TypeLib description.
+AtlGetObjectSourceInterface shares this discovery and returns the actual library
+identity, version and default outgoing IID, with cleared outputs on failure.
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
 

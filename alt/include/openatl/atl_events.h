@@ -279,6 +279,149 @@ protected:
 };
 
 namespace detail {
+struct EventSourceInformation {
+    GUID library = GUID_NULL;
+    IID source = IID_NULL;
+    WORD major = 0, minor = 0;
+    CComPtr<ITypeInfo> info;
+};
+inline HRESULT DefaultEventSource(ITypeInfo* coclass, IID& selected) noexcept {
+    selected = IID_NULL;
+    if (!coclass) return E_POINTER;
+    TYPEATTR* attributes = nullptr;
+    HRESULT hr = coclass->GetTypeAttr(&attributes);
+    if (FAILED(hr)) return hr;
+    if (!attributes) return E_UNEXPECTED;
+    const TYPEKIND kind = attributes->typekind;
+    const WORD count = attributes->cImplTypes;
+    coclass->ReleaseTypeAttr(attributes);
+    if (kind != TKIND_COCLASS) return E_UNEXPECTED;
+    IID found = IID_NULL;
+    for (UINT n = 0; n < count; ++n) {
+        INT flags = 0;
+        hr = coclass->GetImplTypeFlags(n, &flags);
+        if (FAILED(hr)) return hr;
+        if ((flags & (IMPLTYPEFLAG_FDEFAULT | IMPLTYPEFLAG_FSOURCE)) !=
+            (IMPLTYPEFLAG_FDEFAULT | IMPLTYPEFLAG_FSOURCE)) continue;
+        if (found != IID_NULL) return TYPE_E_AMBIGUOUSNAME;
+        HREFTYPE reference = 0;
+        hr = coclass->GetRefTypeOfImplType(n, &reference);
+        if (FAILED(hr)) return hr;
+        CComPtr<ITypeInfo> source;
+        hr = coclass->GetRefTypeInfo(reference, &source.p);
+        if (FAILED(hr)) return hr;
+        if (!source.p) return E_UNEXPECTED;
+        attributes = nullptr;
+        hr = source->GetTypeAttr(&attributes);
+        if (FAILED(hr)) return hr;
+        if (!attributes) return E_UNEXPECTED;
+        const bool correct = attributes->typekind == TKIND_DISPATCH && attributes->guid != IID_NULL;
+        found = attributes->guid;
+        source->ReleaseTypeAttr(attributes);
+        if (!correct) return E_UNEXPECTED;
+    }
+    if (found == IID_NULL) return CONNECT_E_NOCONNECTION;
+    selected = found; return S_OK;
+}
+inline HRESULT GetEventSourceInformation(IUnknown* object, REFIID requested,
+                                         EventSourceInformation& output) noexcept {
+    output = {};
+    if (!object) return E_POINTER;
+    CComPtr<IUnknown> keepAlive(object);
+    CComPtr<ITypeInfo> coclass;
+    CComPtr<ITypeLib> library;
+    IID selected = requested;
+    CComPtr<IProvideClassInfo2> provider2;
+    HRESULT hr = object->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&provider2.p));
+    if (hr == S_OK) {
+        if (!provider2.p) return E_UNEXPECTED;
+        if (selected == IID_NULL) {
+            hr = provider2->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &selected);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || selected == IID_NULL) return E_UNEXPECTED;
+        }
+        hr = provider2->GetClassInfo(&coclass.p);
+        if (FAILED(hr)) return hr;
+        if (hr != S_OK || !coclass.p) return E_UNEXPECTED;
+    } else {
+        if (hr != E_NOINTERFACE) return FAILED(hr) ? hr : E_UNEXPECTED;
+        CComPtr<IProvideClassInfo> provider;
+        hr = object->QueryInterface(IID_IProvideClassInfo, reinterpret_cast<void**>(&provider.p));
+        if (hr == S_OK) {
+            if (!provider.p) return E_UNEXPECTED;
+            hr = provider->GetClassInfo(&coclass.p);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !coclass.p) return E_UNEXPECTED;
+        } else {
+            if (hr != E_NOINTERFACE) return FAILED(hr) ? hr : E_UNEXPECTED;
+            CComPtr<IDispatch> dispatch;
+            hr = object->QueryInterface(IID_IDispatch, reinterpret_cast<void**>(&dispatch.p));
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !dispatch.p) return E_UNEXPECTED;
+            CComPtr<ITypeInfo> incoming;
+            hr = dispatch->GetTypeInfo(0, LOCALE_USER_DEFAULT, &incoming.p);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !incoming.p) return E_UNEXPECTED;
+            UINT index = 0;
+            hr = incoming->GetContainingTypeLib(&library.p, &index);
+            if (FAILED(hr)) return hr;
+            if (hr != S_OK || !library.p) return E_UNEXPECTED;
+            if (selected == IID_NULL) {
+                CComPtr<IPersist> persist;
+                hr = object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&persist.p));
+                if (FAILED(hr)) return hr;
+                if (hr != S_OK || !persist.p) return E_UNEXPECTED;
+                CLSID clsid = CLSID_NULL;
+                hr = persist->GetClassID(&clsid);
+                if (FAILED(hr)) return hr;
+                if (hr != S_OK || clsid == CLSID_NULL) return E_UNEXPECTED;
+                hr = library->GetTypeInfoOfGuid(clsid, &coclass.p);
+                if (FAILED(hr)) return hr;
+                if (hr != S_OK || !coclass.p) return E_UNEXPECTED;
+            }
+        }
+    }
+    if (coclass.p) {
+        TYPEATTR* type = nullptr;
+        hr = coclass->GetTypeAttr(&type);
+        if (FAILED(hr)) return hr;
+        if (!type) return E_UNEXPECTED;
+        const bool correct = type->typekind == TKIND_COCLASS;
+        coclass->ReleaseTypeAttr(type);
+        if (!correct) return E_UNEXPECTED;
+    }
+    if (!library.p) {
+        UINT index = 0;
+        hr = coclass->GetContainingTypeLib(&library.p, &index);
+        if (FAILED(hr)) return hr;
+        if (hr != S_OK || !library.p) return E_UNEXPECTED;
+    }
+    if (selected == IID_NULL) {
+        hr = DefaultEventSource(coclass.p, selected);
+        if (FAILED(hr)) return hr;
+    }
+    EventSourceInformation candidate;
+    TLIBATTR* attributes = nullptr;
+    hr = library->GetLibAttr(&attributes);
+    if (FAILED(hr)) return hr;
+    if (!attributes) return E_UNEXPECTED;
+    candidate.library = attributes->guid;
+    candidate.major = attributes->wMajorVerNum; candidate.minor = attributes->wMinorVerNum;
+    library->ReleaseTLibAttr(attributes);
+    if (candidate.library == GUID_NULL) return E_UNEXPECTED;
+    hr = library->GetTypeInfoOfGuid(selected, &candidate.info.p);
+    if (FAILED(hr)) return hr;
+    if (hr != S_OK || !candidate.info.p) return E_UNEXPECTED;
+    TYPEATTR* type = nullptr;
+    hr = candidate.info->GetTypeAttr(&type);
+    if (FAILED(hr)) return hr;
+    if (!type) return E_UNEXPECTED;
+    const bool correct = type->typekind == TKIND_DISPATCH && type->guid == selected;
+    candidate.info->ReleaseTypeAttr(type);
+    if (!correct) return TYPE_E_ELEMENTNOTFOUND;
+    candidate.source = selected;
+    output = std::move(candidate); return S_OK;
+}
 inline HRESULT EventVariantType(ITypeInfo* info, const TYPEDESC& description,
                                 VARTYPE& type, unsigned depth = 0) noexcept {
     type = VT_EMPTY;
@@ -321,6 +464,21 @@ inline HRESULT EventVariantType(ITypeInfo* info, const TYPEDESC& description,
     default: return E_NOTIMPL;
     }
 }
+}
+
+inline HRESULT WINAPI AtlGetObjectSourceInterface(IUnknown* object, GUID* library,
+    IID* source, unsigned short* major, unsigned short* minor) noexcept {
+    if (library) *library = GUID_NULL;
+    if (source) *source = IID_NULL;
+    if (major) *major = 0;
+    if (minor) *minor = 0;
+    if (!object || !library || !source || !major || !minor) return E_POINTER;
+    detail::EventSourceInformation information;
+    const HRESULT hr = detail::GetEventSourceInformation(object, IID_NULL, information);
+    if (FAILED(hr)) return hr;
+    *library = information.library; *source = information.source;
+    *major = information.major; *minor = information.minor;
+    return S_OK;
 }
 
 template<UINT nID, class T, const IID* pdiid = &IID_NULL,
@@ -413,26 +571,12 @@ public:
         IID selected = iid ? *iid : IID_NULL;
         CComPtr<ITypeInfo> candidate;
         if (selected == IID_NULL || !plibid || *plibid == GUID_NULL) {
-            CComPtr<IProvideClassInfo2> provider;
-            HRESULT hr = source->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&provider.p));
+            detail::EventSourceInformation information;
+            const HRESULT hr = detail::GetEventSourceInformation(source, selected, information);
             if (FAILED(hr)) return hr;
-            if (!provider.p) return E_UNEXPECTED;
-            if (selected == IID_NULL) {
-                hr = provider->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &selected);
-                if (FAILED(hr)) return hr;
-                if (selected == IID_NULL) return E_UNEXPECTED;
-            }
+            selected = information.source;
             if (!plibid || *plibid == GUID_NULL) {
-                CComPtr<ITypeInfo> coclass;
-                hr = provider->GetClassInfo(&coclass.p);
-                if (FAILED(hr)) return hr;
-                if (!coclass.p) return E_UNEXPECTED;
-                CComPtr<ITypeLib> library; UINT index = 0;
-                hr = coclass->GetContainingTypeLib(&library.p, &index);
-                if (FAILED(hr)) return hr;
-                if (!library.p) return E_UNEXPECTED;
-                hr = library->GetTypeInfoOfGuid(selected, &candidate.p);
-                if (FAILED(hr)) return hr;
+                candidate = information.info;
             }
         }
         if (!candidate) {

@@ -432,7 +432,20 @@ GetIDsOfNames, GetFuncInfoFromId and GetUserDefinedType. Explicit library
 identity/version uses the existing CComTypeInfoHolder::GetTI contract, including
 custom holders with that same contract. GUID_NULL library selection obtains the
 native source TypeLib through IProvideClassInfo2/GetClassInfo and
-GetContainingTypeLib; IID_NULL also selects the provider's default source IID.
+GetContainingTypeLib. When that interface is absent, IProvideClassInfo supplies
+the coclass metadata; if both providers are absent, IDispatch::GetTypeInfo supplies
+the containing TypeLib and IPersist::GetClassID selects the coclass in that same
+library. An explicit outgoing IID needs only the IDispatch library on this last
+path. IID_NULL selects IProvideClassInfo2's default source IID, or the coclass
+interface marked with both IMPLTYPEFLAG_FDEFAULT and IMPLTYPEFLAG_FSOURCE.
+Only E_NOINTERFACE permits provider fallback; other provider/metadata errors
+propagate. Missing default sources fail with CONNECT_E_NOCONNECTION; ambiguous
+defaults and malformed type kinds fail rather than select an arbitrary source.
+AtlGetObjectSourceInterface exposes this shared discovery and returns the actual
+library GUID, outgoing IID and library version. It clears every supplied output
+on entry and publishes metadata only after complete success. These fallbacks
+apply to IDispEventImpl and this helper; the manually described
+IDispEventSimpleImpl retains its narrower IProvideClassInfo2 default-IID path.
 Unavailable metadata returns its actual error, without implicit registration
 or a registry/image fallback. There is no static owned ITypeInfo cache.
 
@@ -469,14 +482,21 @@ type-info mocks. They exercise file/registered/source metadata, descriptors,
 conversion/ownership/BYREF checks, unsupported signatures, independent bases,
 eager callbacks, rollback/retry, rebinding and per-user registration cleanup.
 Existing Value DLL direct/native STA/MTA aggregation and registered activation
-emit actual dispatch events from native metadata. The existing WebBrowser case
+exercise IProvideClassInfo-only discovery and emit actual dispatch events from
+native metadata. Registered AuxValue activation exercises the IDispatch/IPersist
+path without a class-info provider. Both expose a native described incoming
+property and verify default event delivery and disconnection. Core cases cover
+missing defaults, malformed coclass metadata, absent IPersist, metadata/class-ID
+failures, cleared outputs, failed subscriptions and successful retry. The existing WebBrowser case
 uses IDispEventImpl for real DocumentComplete events. No target/test mode/export/
 workflow is added; all 36 pinned Microsoft blobs remain unchanged.
 
-IProvideClassInfo-only/IPersist-based discovery fallbacks, wider Automation
-signature/locale behavior, AtlAdviseSinkMap/composite-control integration,
+Wider Automation signature/locale behavior, AtlAdviseSinkMap/composite-control integration,
 exact member layouts and whole original event proxy/project admission remain
 open. This bounded sink implementation is not complete ActiveX control support.
 
 References: [IDispEventImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/idispeventimpl-class),
+[source-discovery helper](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
+[IProvideClassInfo](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nn-ocidl-iprovideclassinfo),
+[IPersist](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nn-objidl-ipersist),
 [sink-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-macros).
