@@ -339,8 +339,10 @@ public:
         item->itemWidth = 80; item->itemHeight = 21;
         if (state_.nested && !nested_) {
             nested_ = true;
+            const auto creation = ATL::detail::AxDialogCreation::Current();
             PlainDialog nested; nested.resource = 637; nested.modal = true;
-            state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 && state_.good;
+            state_.good = nested.DoModal(nullptr, 2112) == 73 && nested.good && nested.parameter == 2112 &&
+                ATL::detail::AxDialogCreation::Current() == creation && state_.good;
         }
         if (state_.recursiveInit && state_.resource == 651 && item->CtlID == 711 && state_.listMeasured == 2 && !state_.initialized)
             ::SendMessageW(m_hWnd, WM_INITDIALOG, 0, 0);
@@ -361,6 +363,7 @@ public:
         return TRUE;
     }
     bool Paint() {
+        const int before = state_.drawn;
         HDC dc = ::CreateCompatibleDC(nullptr);
         BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = 320; info.bmiHeader.biHeight = -240;
@@ -371,7 +374,7 @@ public:
         HGDIOBJ previous = ::SelectObject(dc, bitmap);
         ::SendMessageW(::GetDlgItem(m_hWnd, 711), WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
         ::SelectObject(dc, previous); ::DeleteObject(bitmap); ::DeleteDC(dc);
-        return state_.drawn > 0;
+        return state_.drawn > before;
     }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
         ++state_.initialized;
