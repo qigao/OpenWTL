@@ -724,4 +724,8 @@ public:
 
 } // namespace ATL
 
+#ifndef _ATL_NO_AUTOMATIC_NAMESPACE
+using namespace ATL;
+#endif
+
 #endif // __ATLCOMCLI_H__

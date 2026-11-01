@@ -16,8 +16,19 @@
 #include <cwchar>
 #include <limits>
 #include <utility>
-#include <atlbase.h>
+#include <type_traits>
 #include <atlcomcli.h>
+
+// WeaselTSF includes atlcomcli.h directly before declaring this alias.
+// Keep this check before atlbase.h can supply its own namespace import.
+template<typename I> using com_ptr = CComPtr<I>;
+static_assert(std::is_same<com_ptr<IUnknown>, ATL::CComPtr<IUnknown>>::value,
+              "Standalone atlcomcli.h must expose the default ATL namespace");
+static_assert(std::is_same<CComQIPtr<IUnknown>, ATL::CComQIPtr<IUnknown>>::value &&
+              std::is_same<CComBSTR, ATL::CComBSTR>::value &&
+              std::is_same<CComVariant, ATL::CComVariant>::value,
+              "Standalone COM client names must match the ATL implementation");
+#include <atlbase.h>
 
 #if !defined(OPENATL_REPOSITORY_HEADERS) || OPENATL_REPOSITORY_HEADERS != 0x4F41544CUL
 #error "This target must compile repository-owned OpenATL headers"
@@ -196,7 +207,7 @@ static int system_component_client() {
         reinterpret_cast<void**>(&raw));
     if(FAILED(hr)||raw==nullptr)return failure(11,"CoCreateInstance_GIT",hr);
     {
-        ATL::CComPtr<IGlobalInterfaceTable> git;
+        com_ptr<IGlobalInterfaceTable> git;
         git.Attach(raw);
         raw=nullptr;
         ATL::CComPtr<IGlobalInterfaceTable> shared(git);
