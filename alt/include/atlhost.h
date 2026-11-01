@@ -518,6 +518,16 @@ struct AxDialogCreation {
         for (const auto& record : prepared.initialization) {
             const HWND child = ::GetDlgItem(dialog, record.id);
             if (!child) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+            if (record.IsString()) {
+                // Use the native ANSI message entry point for legacy DLGINIT
+                // bytes; Windows performs the control's code-page translation.
+                const UINT message = record.kind == AxDialogInit::Kind::ListString ? LB_ADDSTRING : CB_ADDSTRING;
+                const LRESULT added = ::SendMessageA(child, message, 0, reinterpret_cast<LPARAM>(record.stream.data()));
+                if (added == LB_ERRSPACE) return E_OUTOFMEMORY;
+                if (added == LB_ERR) return E_FAIL;
+                if (!::IsWindow(dialog) || !::IsWindow(child) || ::GetParent(child) != dialog) return E_ABORT;
+                continue;
+            }
             CComPtr<IStream> stream;
             CComPtr<IStorage> storage;
             HRESULT hr = S_OK;

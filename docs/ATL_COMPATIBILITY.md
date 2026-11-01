@@ -597,9 +597,11 @@ ordinals, fonts, DWORD alignment and creation-data spans before creating any
 window. Header and fixed control records preserve styles, help IDs, identifiers
 and geometry. Ordinary class/title/creation-data records stay opaque and retain
 their bytes; standard creation-data counts include their size word, while
-extended counts exclude it. Input resources are never modified. Only converted
-templates use owned DWORD-aligned storage with CreateDialogIndirectParamW or
-DialogBoxIndirectParamW; unchanged resources retain their original native path.
+extended counts exclude it. Input resources are never modified. Converted templates and resources with
+initialization records use owned DWORD-aligned storage with
+CreateDialogIndirectParamW or DialogBoxIndirectParamW. Other unchanged resources
+retain their original native resource path. A string-only template keeps its
+exact bytes even though its initialization uses the indirect path.
 
 Malformed/truncated templates and malformed brace-prefixed CLSID classes fail
 ERROR_INVALID_DATA. Nonempty placeholder titles or inline ActiveX creation data,
@@ -616,10 +618,32 @@ by a DWORD UTF-16 license character count, that many characters (no terminator),
 and the opaque persisted bytes. A zero WORD terminates the resource; up to three
 zero padding bytes are accepted. The license is a counted BSTR, including any
 embedded zero characters. An absent key uses normal factory creation. Duplicate
-records, missing/non-host control IDs, duplicate matching dialog IDs, truncated
+ActiveX records, conflicting string record kinds, missing/mismatched control IDs,
+duplicate matching dialog IDs, truncated
 headers/payloads/keys and nonzero trailing data fail ERROR_INVALID_DATA before
-any window is created. Data-binding extension and ordinary
-list/combo initialization messages currently fail ERROR_NOT_SUPPORTED.
+any window is created. Data-binding extension and unsupported initialization
+messages fail ERROR_NOT_SUPPORTED.
+
+Ordinary DLGINIT list/combo strings use resource messages 0x0401/0x0403.
+Their payload length includes exactly one final NUL byte; zero-length,
+unterminated and embedded-NUL payloads fail ERROR_INVALID_DATA before window
+creation. Records are contiguous even at odd byte offsets. Repeated strings for
+one control are allowed and retain resource order; control groups initialize in
+dialog order. Mixing list/combo kinds or ActiveX and string records for one ID,
+missing IDs and duplicate matching dialog IDs is invalid.
+
+Only native ListBox/ComboBox class ordinals (0x83/0x85) or their case-insensitive
+class names are admitted for these messages. Class mismatches fail
+ERROR_INVALID_DATA. Owner-drawn controls and LBS_NODATA fail ERROR_NOT_SUPPORTED;
+this path does not provide application drawing/comparison callbacks during
+initialization. Ordinary sorted/case-converting controls use native behavior.
+The initializer sends native LB_ADDSTRING/CB_ADDSTRING through SendMessageA with
+owned, bounded ANSI bytes. Windows translates to the control's character set
+using its native code-page behavior; no alternate encoding library or assumed
+UTF-8 interpretation is added. Empty strings are valid. Native LB_ERR/CB_ERR
+fails initialization; ERRSPACE reports out-of-memory. The existing dialog
+rollback and window-retirement checks apply before forwarding application
+WM_INITDIALOG. Pure list/combo resources do not initialize COM.
 
 DLGINIT storage records (message 0x0377) use the same counted UTF-16 license
 prefix, followed by a complete compound-file image. The bounded resource reader
@@ -657,7 +681,7 @@ validation, dialog ordering, transaction and cleanup rules.
 
 For supported initialization records, conversion creates an empty AxWin child. A
 private dialog procedure initializes the matching controls in dialog order before
-forwarding WM_INITDIALOG with the caller's original parameter. It uses a native
+forwarding WM_INITDIALOG with the caller's original parameter. Stream records use a native
 IStream positioned at the first persisted byte, then the existing host's
 IPersistStreamInit::Load (or IPersistStream fallback) and licensed factory path.
 It does not call InitNew before Load. Initialization failure destroys the native
@@ -688,6 +712,11 @@ both modal/modeless paths and cleanup after a later converted control fails.
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
+Native string initialization: [LB_ADDSTRING](https://learn.microsoft.com/en-us/windows/win32/controls/lb-addstring),
+[CB_ADDSTRING](https://learn.microsoft.com/en-us/windows/win32/controls/cb-addstring),
+[automatic message translation](https://learn.microsoft.com/en-us/windows/win32/intl/automatic-message-translation).
+Microsoft's [BITS resource sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/web/bits/bits_ie/bits_ie.rc)
+provides ordinary DLGINIT format evidence, not an original ATL application admission.
 Native storage: [IPersistStorage::Load](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-load),
 [StgOpenStorageOnILockBytes](https://learn.microsoft.com/en-us/windows/win32/api/coml2api/nf-coml2api-stgopenstorageonilockbytes),
 [CreateILockBytesOnHGlobal](https://learn.microsoft.com/en-us/windows/win32/api/coml2api/nf-coml2api-createilockbytesonhglobal),
@@ -736,3 +765,14 @@ license rejection, failed first/later Load, reentrant storage QI/load retirement
 modal/modeless rollback and owner reuse. Corrupt compound images fail through
 native APIs. Pre-OLE checks cover bounded storage payloads and license prefixes;
 no COM initialization or original application admission is inferred.
+
+Existing pre-OLE dialog cases also use compiled standard/extended and named
+list/combo resources. They verify repeated and interleaved records, native
+sorting, empty entries, odd byte offsets, process-ACP conversion against native
+MultiByteToWideChar, native uppercase behavior, exact template/resource bytes,
+modal/modeless parameters, owner reuse and self-deleting final callbacks. Invalid
+lengths/terminators/IDs/classes, conflicting kinds and unsupported owner-drawn or
+no-data styles fail before user initialization. The existing lifecycle case mixes
+these strings with a real registered ActiveX INITNEW control. Existing executable,
+modes, workflow, 25-second budgets and stdout markers are unchanged. Nonempty or
+licensed INITNEW still has no admitted wire format and remains unsupported.

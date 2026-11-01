@@ -189,24 +189,75 @@ bool dialogTemplates() {
         bad = snapshot; std::memcpy(bad.data() + 8, &oversized, sizeof(oversized));
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
     }
+    for (WORD id : {WORD(637), WORD(638)}) {
+        const HRSRC dialog = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        const HRSRC init = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(dialog && init);
+        const auto bytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, dialog)));
+        const auto initBytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, init)));
+        const DWORD size = ::SizeofResource(instance, dialog), initSize = ::SizeofResource(instance, init);
+        const std::vector<BYTE> snapshot(initBytes, initBytes + initSize);
+        AxDialogTemplate built;
+        CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, initSize) == ERROR_SUCCESS && !built.converted);
+        CHECK(built.size == size && !std::memcmp(bytes, built.storage.data(), size) && built.initialization.size() == 6);
+        CHECK(built.initialization[0].id == 711 && built.initialization[0].kind == ATL::detail::AxDialogInit::Kind::ListString);
+        CHECK(built.initialization[1].id == 711 && !std::strcmp(reinterpret_cast<const char*>(built.initialization[1].stream.data()), "alpha"));
+        CHECK(built.initialization[2].id == 712 && built.initialization[5].stream.size() == 1);
+        const size_t minimum = 74; // Six headers, their counted bytes and the terminator.
+        CHECK(initSize >= minimum && initSize - minimum <= 3);
+        for (size_t cut = 0; cut < minimum; ++cut) {
+            CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
+        }
+        CHECK(!std::memcmp(initBytes, snapshot.data(), initSize));
+        auto bad = snapshot; const WORD unknown = 799;
+        std::memcpy(bad.data(), &unknown, sizeof(unknown));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; const WORD list = 0x401;
+        std::memcpy(bad.data() + 2, &list, sizeof(list)); // Conflicting record kinds for one ID.
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+    }
     return true;
 }
-struct FreeDialogState { bool modal = false; int initialized = 0; HWND window = nullptr; };
+bool DialogStringContents(HWND window) {
+    const HWND list = ::GetDlgItem(window, 711), combo = ::GetDlgItem(window, 712);
+    CHECK(list && combo && ::SendMessageW(list, LB_GETCOUNT, 0, 0) == 2 && ::SendMessageW(combo, CB_GETCOUNT, 0, 0) == 4);
+    WCHAR text[32]{};
+    CHECK(::SendMessageW(list, LB_GETTEXT, 0, reinterpret_cast<LPARAM>(text)) == 5 && !::wcscmp(text, L"alpha"));
+    CHECK(::SendMessageW(list, LB_GETTEXT, 1, reinterpret_cast<LPARAM>(text)) == 4 && !::wcscmp(text, L"beta"));
+    const bool upper = (::GetWindowLongPtrW(combo, GWL_STYLE) & CBS_UPPERCASE) != 0;
+    CHECK(::SendMessageW(combo, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(text)) == 3 && !::wcscmp(text, upper ? L"LOW" : L"low"));
+    CHECK(::SendMessageW(combo, CB_GETLBTEXT, 1, reinterpret_cast<LPARAM>(text)) == 4 && !::wcscmp(text, upper ? L"HIGH" : L"high"));
+    const char encoded[] = {static_cast<char>(0xC3), static_cast<char>(0xA9), 0};
+    WCHAR expected[16]{};
+    const int count = ::MultiByteToWideChar(CP_ACP, 0, encoded, 2, expected, 15);
+    CHECK(count > 0);
+    if (upper) CHECK(::CharUpperBuffW(expected, count) == static_cast<DWORD>(count));
+    CHECK(::SendMessageW(combo, CB_GETLBTEXT, 2, reinterpret_cast<LPARAM>(text)) == count && !::wcscmp(text, expected));
+    CHECK(::SendMessageW(combo, CB_GETLBTEXT, 3, reinterpret_cast<LPARAM>(text)) == 0 && !text[0]);
+    CHECK(::SendMessageW(combo, CB_GETCURSEL, 0, 0) == CB_ERR);
+    return true;
+}
+struct FreeDialogState { bool modal = false, checkStrings = false, good = true; int initialized = 0; HWND window = nullptr; };
 INT_PTR CALLBACK FreeDialogProc(HWND window, UINT message, WPARAM, LPARAM parameter) {
     if (message != WM_INITDIALOG) return FALSE;
     auto state = reinterpret_cast<FreeDialogState*>(parameter);
     ++state->initialized; state->window = window;
+    if (state->checkStrings) state->good = DialogStringContents(window);
     if (state->modal) ::EndDialog(window, 83);
     return TRUE;
 }
 class PlainDialog : public ATL::CAxDialogImpl<PlainDialog> {
 public:
     enum { IDD = 602 };
+    int resource = IDD;
+    int GetIDD() const { return resource; }
     bool modal = false, modeRejected = false;
+    bool good = true;
     int initialized = 0, finalized = 0;
     LPARAM parameter = 0;
     LRESULT Init(UINT, WPARAM, LPARAM value, BOOL&) {
         ++initialized; parameter = value;
+        if (resource == 637 || resource == 638) good = DialogStringContents(m_hWnd);
         if (modal) { modeRejected = !DestroyWindow(); EndDialog(73); }
         return TRUE;
     }
@@ -226,7 +277,7 @@ public:
         MESSAGE_HANDLER(WM_INITDIALOG, Init)
     END_MSG_MAP()
 };
-struct DialogRetirement { int initialized = 0, finalized = 0, destroyed = 0; };
+struct DialogRetirement { int initialized = 0, finalized = 0, destroyed = 0; bool good = true; };
 class CloseFailureDialog : public ATL::CAxDialogImpl<CloseFailureDialog> {
 public:
     enum { IDD = 602 };
@@ -246,12 +297,15 @@ public:
 class DeletingDialog : public ATL::CAxDialogImpl<DeletingDialog> {
     DialogRetirement& state_;
     bool modal_;
+    int resource_;
 public:
     enum { IDD = 602 };
-    DeletingDialog(DialogRetirement& state, bool modal) : state_(state), modal_(modal) {}
+    DeletingDialog(DialogRetirement& state, bool modal, int resource = IDD) : state_(state), modal_(modal), resource_(resource) {}
+    int GetIDD() const { return resource_; }
     ~DeletingDialog() { ++state_.destroyed; }
     LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) {
         ++state_.initialized;
+        if (resource_ != IDD) state_.good = DialogStringContents(m_hWnd);
         if (modal_) EndDialog(91); else DestroyWindow();
         return TRUE;
     }
@@ -312,6 +366,32 @@ bool plainDialogs() {
     CHECK(modeless.initialized == 1 && modeless.finalized == 1 && modeless.destroyed == 1);
     CHECK((new DeletingDialog(modal, true))->DoModal(nullptr) == 91);
     CHECK(modal.initialized == 1 && modal.finalized == 1 && modal.destroyed == 1);
+    for (WORD id : {WORD(637), WORD(638)}) {
+        PlainDialog strings; strings.resource = id;
+        CHECK(strings.Create(nullptr, 1773) && strings.good && strings.parameter == 1773 && strings.initialized == 1);
+        CHECK(strings.DestroyWindow() && strings.finalized == 1);
+        strings.modal = true;
+        CHECK(strings.DoModal(nullptr, 1774) == 73 && strings.good && strings.parameter == 1774 && strings.initialized == 2 && strings.finalized == 2);
+        strings.modal = false; strings.resource = 639;
+        CHECK(!strings.Create(nullptr) && ::GetLastError() == ERROR_INVALID_DATA && strings.initialized == 2);
+        strings.resource = id;
+        CHECK(strings.Create(nullptr) && strings.good && strings.DestroyWindow() && strings.initialized == 3);
+    }
+    for (WORD id : {WORD(639), WORD(640), WORD(641), WORD(642), WORD(643), WORD(644), WORD(645), WORD(646)}) {
+        const DWORD error = id == 641 || id == 645 || id == 646 ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA;
+        CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == error);
+        CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == error);
+    }
+    free = {}; free.checkStrings = true;
+    window = ATL::AtlAxCreateDialog(instance, L"OPENATL_STRINGS", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free));
+    CHECK(window && free.good && free.initialized == 1 && ::DestroyWindow(window));
+    free.modal = true;
+    CHECK(ATL::AtlAxDialogBox(instance, L"OPENATL_STRINGS", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free)) == 83 && free.good && free.initialized == 2);
+    DialogRetirement stringModeless, stringModal;
+    CHECK(!(new DeletingDialog(stringModeless, false, 637))->Create(nullptr));
+    CHECK(stringModeless.good && stringModeless.initialized == 1 && stringModeless.finalized == 1 && stringModeless.destroyed == 1);
+    CHECK((new DeletingDialog(stringModal, true, 638))->DoModal(nullptr) == 91);
+    CHECK(stringModal.good && stringModal.initialized == 1 && stringModal.finalized == 1 && stringModal.destroyed == 1);
     return true;
 }
 class Source : public IConnectionPointContainer, public IConnectionPoint {
