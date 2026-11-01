@@ -39,7 +39,7 @@ if(CMAKE_HOST_WIN32)
     "1 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Outer.rgs\"\n2 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Chain.rgs\"\n102 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/ArrayManager.rgs\"\n")
   target_sources(openatl_activex PRIVATE "${_commap_registry_rc}")
   set_source_files_properties("${PROJECT_BINARY_DIR}/tests/com_server/fixture_typelib.rc"
-    PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb;${_safe_generated}/AtlSafeArray.tlb")
+    PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb;${_safe_generated}/AtlSafeArray.tlb;${PROJECT_BINARY_DIR}/tests/com_server/event-fixture/EventFixture.tlb")
   add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture
     openatl_unload_fixture openatl_unload_probe)
   set_tests_properties(openatl.activex_events PROPERTIES RESOURCE_LOCK openatl_com_server_registration)

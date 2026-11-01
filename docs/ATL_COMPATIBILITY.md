@@ -22,6 +22,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
+| `atlcom.h`: `IDispEventImpl` | Native registered/source-provided TypeLib metadata, `SINK_ENTRY`/`SINK_ENTRY_EX`/`SINK_ENTRY_EX_P`, independent sink identities, transactional binding and typed invocation. See TypeLib event scope below. |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
 | `atlbase.h`: `CAtlDllModuleT<T>` | Real DLL exports and one `OpenATL::COM::Module` engine. Supports bound tables and static `OBJECT_ENTRY_AUTO` discovery, plus class-directed `UpdateRegistry(BOOL)` callbacks with ordered rollback. Supplies a lazy RGS context using one captured per-user mode, with explicit context overrides. TypeLib=TRUE preloads the own-image TypeLib, registers it through OLEAUT32 after classes, and rolls class callbacks back if TypeLib registration fails. Automatic ProgID inference remains pending. |
@@ -125,7 +126,7 @@ the whole original COMMap DLL build/link or any of the 37 pure-ATL projects pass
 
 **Tracked compatibility gaps:** exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
-TypeLib-driven event sinks, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
+broader event-provider/signature compatibility, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
 `CComModule` has an implemented legacy object-map subset; its presence is
 not a claim that complete legacy ATL applications already pass. Windowed containment and typed simple
@@ -363,7 +364,7 @@ snapshot/clone retirement gates DllCanUnloadNow on the existing module path.
 
 The implementation uses typed embedded faces rather than Microsoft's internal
 layout. Internal locator/map metadata, exact inheritance/binary layouts,
-TypeLib-driven IDispEventImpl,
+complete TypeLib event-provider/signature compatibility,
 cross-apartment marshaling of custom interfaces and unchanged original event
 proxy/full-project admission remain unqualified. No target, test mode, export
 or workflow is added. All 36 pinned original Microsoft blobs remain unchanged.
@@ -414,7 +415,7 @@ The existing Value DLL exposes an explicit test property: real direct/native
 STA/MTA aggregated and registered activation cases verify old-value observation
 on request, no commit/notification after denial, new-value observation after
 commit, and notification to sinks reached through another outgoing IID.
-Original event proxies/projects and TypeLib-driven IDispEventImpl remain open.
+Original event proxies/projects and broader TypeLib event compatibility remain open.
 No target, test mode, export or workflow is added; all 36 original blobs remain
 unchanged. Printing/hardware HSP remain outside CI.
 
@@ -422,3 +423,60 @@ References: [IPropertyNotifySinkCP](https://learn.microsoft.com/en-us/cpp/atl/re
 [CFirePropNotifyEvent](https://learn.microsoft.com/en-us/cpp/atl/reference/cfirepropnotifyevent-class),
 [OnRequestEdit](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipropertynotifysink-onrequestedit),
 [OnChanged](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipropertynotifysink-onchanged).
+
+## TypeLib-driven event sinks
+
+IDispEventImpl<nID, T, pdiid, plibid, major, minor, tihclass> derives from the
+typed simple sink and exposes _tihclass, GetTypeInfoCount/GetTypeInfo,
+GetIDsOfNames, GetFuncInfoFromId and GetUserDefinedType. Explicit library
+identity/version uses the existing CComTypeInfoHolder::GetTI contract, including
+custom holders with that same contract. GUID_NULL library selection obtains the
+native source TypeLib through IProvideClassInfo2/GetClassInfo and
+GetContainingTypeLib; IID_NULL also selects the provider's default source IID.
+Unavailable metadata returns its actual error, without implicit registration
+or a registry/image fallback. There is no static owned ITypeInfo cache.
+
+Native FUNCDESC/TYPEDESC data supplies calling convention and argument types.
+Enum/alias and interface references are resolved through native referenced type
+information with bounded recursion. Supported typed calls include scalar
+integers/floats, BOOL/DATE representations, BSTR, VARIANT, COM interfaces and
+single-level scalar/VARIANT BYREF pointers, up to eight parameters with void or
+HRESULT handlers. Writable pointees must match the native type/width. Optional,
+named/LCID/retval parameters, arrays/records, nested BYREF and non-void/HRESULT
+return contracts are not admitted; unsupported metadata fails before a handler
+is called. GetUserDefinedType returns VT_EMPTY for unresolved/unsupported types.
+
+SINK_ENTRY, SINK_ENTRY_EX and SINK_ENTRY_EX_P take an explicit typed member
+pointer such as &Owner::Handler. They can reference a handler base subobject:
+the compiler performs its pointer adjustment before invocation. The existing
+SINK_ENTRY_INFO shorthand remains available for manually specified metadata.
+Legacy bare-handler spelling on the new macros, internal ATL sink-map/holder
+layouts and the complete ATL macro/helper surface remain unqualified.
+
+Each nID base is an independent IDispatch/IUnknown identity. Connection metadata
+is staged before native Advise so synchronous callbacks can use it. Reentrant
+binding changes fail; subscription failure restores the original identity and
+releases staged metadata. Wrong-source/failed explicit Unadvise preserves the
+connection for retry. Successful Unadvise releases its metadata and allows
+rebinding. Destructor cleanup disconnects before destroying that metadata;
+failure terminates rather than leave a source pointing at a destroyed sink.
+The containing C++ object owns the sink's memory and must finish callbacks and
+unadvise before destruction. Sink methods do not provide cross-thread marshaling.
+
+Existing native core cases load an own event fixture generated by Windows SDK
+MIDL (resource 4), with no replacement of pinned original IDLs or handwritten
+type-info mocks. They exercise file/registered/source metadata, descriptors,
+conversion/ownership/BYREF checks, unsupported signatures, independent bases,
+eager callbacks, rollback/retry, rebinding and per-user registration cleanup.
+Existing Value DLL direct/native STA/MTA aggregation and registered activation
+emit actual dispatch events from native metadata. The existing WebBrowser case
+uses IDispEventImpl for real DocumentComplete events. No target/test mode/export/
+workflow is added; all 36 pinned Microsoft blobs remain unchanged.
+
+IProvideClassInfo-only/IPersist-based discovery fallbacks, wider Automation
+signature/locale behavior, AtlAdviseSinkMap/composite-control integration,
+exact member layouts and whole original event proxy/project admission remain
+open. This bounded sink implementation is not complete ActiveX control support.
+
+References: [IDispEventImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/idispeventimpl-class),
+[sink-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-macros).

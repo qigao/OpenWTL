@@ -38,6 +38,7 @@ bool RunRgsParserTests();
 bool RunRgsRegistryTests();
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
 bool RunOriginalCommapTypeLibTest(const char* path);
+bool RunDllTypeLibEventTests(IOpenATLValue* object);
 #endif
 namespace {
 std::atomic<int> live{0};
@@ -419,6 +420,9 @@ bool aggregateDll(Dll& dll, bool nativeCom) {
     REQUIRE(value->GetValue(&result) == S_OK && result == 42);
     REQUIRE(RunDllConnectionPointTests(value.p, nullptr));
     REQUIRE(RunDllPropertyNotifyTests(value.p));
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    REQUIRE(RunDllTypeLibEventTests(value.p));
+#endif
     ATL::CComPtr<IOpenATLSecond> second;
     REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && outer.refs == 3);
     REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
@@ -1712,6 +1716,9 @@ bool native(DWORD apartment) {
         ATL::CComPtr<IEnumConnections> snapshot, clone;
         REQUIRE(RunDllConnectionPointTests(eventObject.p, &snapshot.p));
         REQUIRE(RunDllPropertyNotifyTests(eventObject.p));
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        REQUIRE(RunDllTypeLibEventTests(eventObject.p));
+#endif
         REQUIRE(snapshot->Clone(&clone.p) == S_OK);
         eventObject.Release();
         ::CoFreeUnusedLibrariesEx(0, 0);
