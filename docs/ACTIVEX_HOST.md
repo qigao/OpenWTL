@@ -119,9 +119,13 @@ an empty list returns E_NOTIMPL so the control can choose its own UI.
 list from PROP_PAGE/PROP_ENTRY_TYPE metadata, deduplicating page CLSIDs in their
 first-declaration order and ignoring CLSID_NULL. Each call returns an independent
 CoTaskMem array; headers/static maps do not initialize COM. PROP_DATA_ENTRY records
-member offset/size/type metadata. The full ATL property-page classes and map-driven
-persistence/browsing remain unfinished; declaring a map alone does not save data.
+member offset/size/type metadata. `IPerPropertyBrowsingImpl` maps individual
+Automation DISPIDs to pages and obtains current display text through native
+IDispatch/VariantChangeType; EX entries select their declared dispatch interface.
+Its default predefined-value list is empty. The full ATL property-page classes
+and map-driven persistence remain unfinished; declaring a map alone does not save data.
 See [property-map scope](ATL_COMPATIBILITY.md#property-map-page-discovery).
+See [per-property browsing](ATL_COMPATIBILITY.md#per-property-browsing).
 See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.

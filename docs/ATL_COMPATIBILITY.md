@@ -22,7 +22,8 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
-| `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Map-driven persistence/browsing remains pending. |
+| `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Map-driven persistence remains pending. |
+| `atlctl.h`: `IPerPropertyBrowsingImpl<T>` | DISPID-to-page mapping, native Automation display strings with EX-interface selection, empty default predefined lists and E_NOTIMPL predefined values. See per-property browsing below. |
 | `atlcom.h`: `IDispEventImpl` | Native registered/source-provided TypeLib metadata, `SINK_ENTRY`/`SINK_ENTRY_EX`/`SINK_ENTRY_EX_P`, independent sink identities, transactional binding and typed invocation. See TypeLib event scope below. |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
@@ -597,16 +598,64 @@ modes, stdout/stderr contracts, timeout budgets and workflows remain unchanged;
 real printing/hardware HSP remain outside CI and all 36 original blobs and
 whole-application admission are unchanged.
 
-This implements declarations and page discovery. IPersistPropertyBagImpl,
-IPersistStreamInitImpl, IPerPropertyBrowsingImpl, interface-serialization callback
+This implements declarations and page discovery; per-property browsing is described
+below. IPersistPropertyBagImpl, IPersistStreamInitImpl, interface-serialization callback
 entries, IPropertyPageImpl, CAxPropertyPageImpl, control splitting and composite
 controls remain unfinished. A property-map declaration alone does not implement
-property access, storage, loading or saving.
+storage, loading or saving. Display-string browsing invokes Automation properties;
+direct-data metadata is not read as live object storage.
 
 References: [ISpecifyPropertyPagesImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ispecifypropertypagesimpl-class),
 [property-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/property-map-macros),
 [page declaration order](https://learn.microsoft.com/en-us/cpp/atl/specifying-property-pages),
 [native GetPages ownership](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ispecifypropertypages-getpages).
+
+## Per-property browsing
+
+IPerPropertyBrowsingImpl<T> in atlctl.h exposes the four native IPerPropertyBrowsing
+methods through the normal COM map and existing object identity/reference counts.
+MapPropertyToPage selects the first dispatch-property entry for the DISPID,
+including negative and zero DISPIDs. It returns the declared page GUID, including
+an explicit CLSID_NULL for an unpaged property. Page-only and direct-data entries
+do not declare DISPIDs; absent mappings return E_INVALIDARG with CLSID_NULL.
+
+GetDisplayString selects a mapped property's dispatch IID (including EX entries)
+or IID_IDispatch for an unmapped DISPID. It retains the queried interface, invokes
+the actual DISPID with DISPATCH_PROPERTYGET, IID_NULL, LOCALE_USER_DEFAULT and no
+arguments, then delegates conversion to Windows VariantChangeType with flags zero
+and VT_BSTR. Descriptions in the map are not substituted for current values.
+The returned BSTR belongs to the caller and must be freed with SysFreeString;
+embedded zeros and the native BSTR length are preserved. Numeric, Boolean,
+BYREF and other conversions follow the operating system's Automation rules.
+
+GetPredefinedStrings returns S_OK with two empty arrays; no predefined choices
+are synthesized from type information. GetPredefinedValue initializes its output
+to VT_EMPTY and returns E_NOTIMPL. Applications can override these virtual methods
+to supply choices. Null output addresses return E_POINTER; provided outputs are
+cleared before lookup/callbacks. A null map returns E_UNEXPECTED; map/callback
+exceptions use the existing ATL error translation. Query/Invoke/native conversion
+failures propagate with empty outputs; non-S_OK successful Query/Invoke results
+are rejected as E_UNEXPECTED. Temporary variants and retained interfaces are
+released on success, failure and exceptions. No COM apartment or registry state
+is created by the helper.
+
+The existing pre-OLE ActiveX setup tests distinct default/EX dispatch subobjects,
+canonical IUnknown identity under multiple inheritance, first-match mapping,
+zero/negative/unmapped DISPIDs, page/data-entry exclusion, explicit null pages,
+native numeric/Boolean/BYREF conversion, independent length-preserving BSTRs,
+missing interfaces/members, failure/exception cleanup with actual reference
+counts, retry and reentrant page lookup. Existing native property-frame commit
+and cancel cases also read the same control before and after the real modal
+frame: Apply changes the displayed value and Cancel preserves it. No executable,
+test mode, registration, timeout budget, workflow or stderr contract is added.
+Full property-page classes, persistence, interface serialization and original
+whole-application qualification remain pending; real printing/hardware HSP
+remain outside CI.
+
+References: [IPerPropertyBrowsingImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/iperpropertybrowsingimpl-class),
+[MapPropertyToPage](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iperpropertybrowsing-mappropertytopage),
+[GetDisplayString ownership](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iperpropertybrowsing-getdisplaystring),
+[native VariantChangeType](https://learn.microsoft.com/en-us/windows/win32/api/oleauto/nf-oleauto-variantchangetype).
 
 ## Native property frames
 
@@ -643,7 +692,7 @@ Real printing and hardware HSP remain outside CI; all 36 pinned Microsoft blobs
 and whole-application admission remain unchanged.
 
 Source property-map declarations and page discovery are supported as described
-above. IPropertyPageImpl, CAxPropertyPageImpl, map-driven persistence/browsing,
+above, together with per-property browsing. IPropertyPageImpl, CAxPropertyPageImpl, map-driven persistence,
 control splitting and full composite-control behavior remain unfinished.
 
 References: [IOleControlSite::ShowPropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iolecontrolsite-showpropertyframe),
