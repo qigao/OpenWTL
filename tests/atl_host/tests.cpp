@@ -6,6 +6,7 @@
 bool RunHostLifecycleTests();
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
 bool RunMicrosoftCommapClassTests();
+bool RunMicrosoftSafeArrayTests();
 #endif
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ACTIVEX_FAIL line=%d: %s hr=%08lx\n", __LINE__, #x, static_cast<unsigned long>(::GetLastError())); return false; } } while (0)
@@ -239,7 +240,7 @@ int main(int argc, char** argv) {
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
-    if (test == events) ok = RunMicrosoftCommapClassTests();
+    if (test == events) ok = RunMicrosoftCommapClassTests() && RunMicrosoftSafeArrayTests();
 #endif
     if (ok) ok = test();
     ::OleUninitialize();

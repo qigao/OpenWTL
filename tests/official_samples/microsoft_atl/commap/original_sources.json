@@ -32,6 +32,12 @@
     "COMMap.def": "57af0c1c58f90c800afffc2f04547a90c63ab7c7",
     "aggreg/Aggreg.cpp": "5efeadebeaaf27c5782b85bc48587f1ede61efb6",
     "aggreg/Aggreg.rc": "07a590124c58d4efea541fbd2eda38be4ee3143e",
-    "aggreg/Aggreg.def": "f6a839558fa3531b98796a0261dbb0aa9034e222"
+    "aggreg/Aggreg.def": "f6a839558fa3531b98796a0261dbb0aa9034e222",
+    "../atlsafearray/ArrayManager.h": "9d39e3d32e16183684ca3da2c9a3f26744ed5962",
+    "../atlsafearray/ArrayManager.cpp": "ae493c83ba337ea0dbca63cc0e20d2be60fd4846",
+    "../atlsafearray/AtlSafeArray.idl": "fe029a48130d45fa3b1164b67f3ea9b17e30105c",
+    "../atlsafearray/stdafx.h": "588435e3e7a0cbcc29a4413151503af0ea9d26c3",
+    "../atlsafearray/resource.h": "ecda38c999f83456296ef46db6d97523fbdad1b6",
+    "../../../atl_rgs/fixtures/ArrayManager.rgs": "39bf8a7d2bc75c21f81c74b761ce97c95234c59a"
   }
 }

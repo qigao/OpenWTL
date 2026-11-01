@@ -2,6 +2,7 @@
 // Original COMMap/aggreg module entry points also run in two existing DLLs.
 #include "premap.h"
 #include "COMMap.h"
+#include "AtlSafeArray.h"
 #include "Outer.h"
 #include "aggreg/Agg.h"
 #include "aggreg/AggBlind.h"
@@ -320,7 +321,7 @@ bool OriginalRegisteredDispatch(IOuter* outer) {
 bool OriginalClassBodies() {
     ORIGINAL_CLASS_CHECK(!ATL::_pAtlModule);
     const CLSID* ids[] = {&CLSID_COuter, &CLSID_CChain, &CLSID_CAgg,
-        &CLSID_CAggBlind, &CLSID_CAutoAgg, &CLSID_CAutoAggB};
+        &CLSID_CAggBlind, &CLSID_CAutoAgg, &CLSID_CAutoAggB, &CLSID_ArrayManager};
     size_t count = 0;
     for (const auto* entry = ATL::detail::autoObjectEntries.load(std::memory_order_acquire);
          entry; entry = entry->next) {
@@ -331,7 +332,8 @@ bool OriginalClassBodies() {
     }
     // Original Chain.h occurs in Chain.cpp, Outer.cpp and this translation
     // unit; each aggregate header occurs twice. One logical entry per class.
-    ORIGINAL_CLASS_CHECK(count == 6);
+    // ArrayManager adds one independently tested class to this existing image.
+    ORIGINAL_CLASS_CHECK(count == 7);
     OriginalClassModule module;
     ClassRegistrations registrations(module);
     ATL::CComPtr<IClassFactory> outerFactory;

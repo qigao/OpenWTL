@@ -1,0 +1,4 @@
+*.cpp -text -whitespace
+*.h -text -whitespace
+*.idl -text -whitespace
+safearray_native.cpp whitespace=blank-at-eol,blank-at-eof,space-before-tab

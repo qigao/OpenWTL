@@ -108,6 +108,7 @@ execution. See the [toolchain matrix](docs/TOOLCHAIN_MATRIX.md) and
 | ATL utilities | `CString`, `CAtlFile`, `CPath`, collections, heap, time, synchronization, mapping and the bounded `CImage` subset; [API matrix](docs/ATL_COMPATIBILITY.md) |
 | Text encoding | Counted UTF-8/UTF-16/ACP conversions through native Windows NLS; [encoding contracts](docs/UNICODE.md) |
 | COM Client | Smart pointers, BSTR/VARIANT ownership and Windows component activation; [API matrix](docs/ATL_COMPATIBILITY.md) |
+| Automation arrays | Native `CComSafeArray`, SAFEARRAY/BSTR/VARIANT ownership and `IObjectSafetyImpl`; original ArrayManager class/IDL dispatch subset |
 | COM Server | Class factories, ordinary/poly aggregation and tear-off COM maps, rich error information, registration, RGS and DLL module lifetime; [server contracts](docs/COM_SERVER.md) and [module contracts](docs/ATL_MODULE.md) |
 | ActiveX | Windowed hosting and typed event sinks; [hosting contracts and gaps](docs/ACTIVEX_HOST.md) |
 

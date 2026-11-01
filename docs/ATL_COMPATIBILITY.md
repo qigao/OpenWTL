@@ -18,6 +18,8 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlbase.h`, `atlcomcli.h` | Existing Win32 modules, threading policies, COM smart pointers, BSTR/VARIANT helpers |
 | `atlwin.h`, `atlstr.h`, utility headers | Existing documented Windows/WTL subset; Unicode-only, C++17 |
 | `atlhost.h`, `atliface.h` | Windowed OLE containment, `CAxWindow`/`CAxWindow2`, site/ambient interfaces and explicit control creation; see [ownership contract](ACTIVEX_HOST.md) |
+| `atlsafe.h`: `CComSafeArray<T, VARTYPE>`, `CComSafeArrayBound` | Native OLEAUT32 array creation, deep copy, attach/detach, checked borrowed element access, copied/transferred resource elements, append, multidimensional access and resize. Explicit destruction preserves ownership on native failure. See SAFEARRAY scope below. |
+| `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
 | `atlbase.h`: `CAtlModule`, `CAtlModuleT`, `CAtlExeModuleT` | Module locks, termination callbacks, balanced EXE COM startup and automatic/explicit native class-factory registration. EXE activation shares the DLL factory engine and cookie rollback; explicit empty tables opt out. Common/EXE persistent RegisterServer/UnregisterServer share the automatic class map, CLSID selection, resource context and TypeLib preflight/rollback. RegisterAppId/UnregisterAppId use the derived resource hook; DLL exports/EXE registration commands order AppID and class work with one captured policy and rollback. Per-user commands enable the image-local mode and retain the TRUE TypeLib request; incompatible enclosing policies are rejected. EXE operations validate thread/initialization/termination. Existing tests cover HKCU LocalServer32 SCM launch, STA/MTA servers and native IDispatch/IPersist marshaling across processes. AppID security policy, arbitrary custom-interface marshaling and idle shutdown remain pending; see [module protocol](ATL_MODULE.md). |
 | `atlbase.h`: `CAtlDllModuleT<T>` | Real DLL exports and one `OpenATL::COM::Module` engine. Supports bound tables and static `OBJECT_ENTRY_AUTO` discovery, plus class-directed `UpdateRegistry(BOOL)` callbacks with ordered rollback. Supplies a lazy RGS context using one captured per-user mode, with explicit context overrides. TypeLib=TRUE preloads the own-image TypeLib, registers it through OLEAUT32 after classes, and rolls class callbacks back if TypeLib registration fails. Automatic ProgID inference remains pending. |
@@ -121,7 +123,7 @@ the whole original COMMap DLL build/link or any of the 37 pure-ATL projects pass
 
 **Tracked compatibility gaps:** exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
-connection-point server templates, SAFEARRAY wrappers, windowless
+connection-point server templates, complete SAFEARRAY internal-wrapper/layout compatibility, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
 `CComModule` has an implemented legacy object-map subset; its presence is
 not a claim that complete legacy ATL applications already pass. Windowed containment and typed simple
@@ -271,3 +273,47 @@ remain separate; no CComObject pointer is fabricated for a contained owner.
 Public contracts: [CComPolyObject](https://learn.microsoft.com/en-us/cpp/atl/reference/ccompolyobject-class),
 [aggregation macros](https://learn.microsoft.com/en-us/cpp/atl/reference/aggregation-and-class-factory-macros),
 and [CComCoClass](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomcoclass-class).
+
+
+## Native SAFEARRAY and original ArrayManager
+
+CComSafeArray<T, VARTYPE> owns a genuine OLEAUT32 SAFEARRAY and one native lock
+for stable borrowed GetAt references. Create/Attach/CopyFrom validate element
+VARTYPE and size. Native bound/index rules support negative lower bounds,
+zero-length arrays and multidimensional Get/Set/Resize. CComSafeArrayBound
+exposes SAFEARRAYBOUND fields and standard count/lower/upper helpers.
+Supported native types include integer/floating types, CY/DECIMAL, BSTR,
+VARIANT, IUnknown* and IDispatch*. VT_BOOL/DATE/ERROR can be selected explicitly
+with a correctly sized native representation. Record arrays are not admitted.
+
+SetAt/Add copy BSTR/VARIANT values by default; bCopy=FALSE transfers caller-owned
+resources only on success. Interface elements acquire native AddRef ownership.
+Append stages inputs before resizing, including copied self-appends; failed
+resize preserves both destination and no-copy caller ownership. Destroy and
+replacement retain the old array when native external locks prevent release.
+Detach removes only the wrapper's lock. External locks must balance before
+destruction; a failed destructor cleanup terminates as an ownership violation.
+GetAt/operator[] expose borrowed native T references; use SetAt for owning
+resource updates. Internal _ATL_TYPEWRAPPER aliases and exact Microsoft layout
+are not qualified. GetSafeArrayPtr is an output receiver for an empty wrapper;
+callers must not overwrite or independently free an owned m_psa.
+
+CComVariant(SAFEARRAY*) makes a native deep copy and owns the VT_ARRAY result;
+a null array produces VT_EMPTY. IObjectSafetyImpl exposes its template-declared
+supported/current flags and validates interfaces through real QI. Unsupported
+masks fail without changing state; enabled bits outside the mask are ignored.
+It implements the flag protocol; the application owns its actual safety policy.
+
+The existing no-COM core case exercises native type/size metadata, bounds,
+locks, resize/destroy/replacement failure, resource transfer/copy, interface
+references and multidimensional behavior against OLEAUT32. The existing STA
+events case additionally compiles unchanged Microsoft ArrayManager.cpp/.h and
+its IDL through native MIDL. Real class factories/CoCreateInstance, original
+RGS callbacks, IObjectSafety and registered GetTypeInfo/GetIDsOfNames/Invoke
+execute Add/Change/Remove/GetArray. Returned snapshots survive class/module
+retirement. Full original DLL/project deployment and all Automation/record/
+internal-wrapper contracts remain separate.
+
+References: [CComSafeArray](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomsafearray-class),
+[CComSafeArrayBound](https://learn.microsoft.com/en-us/cpp/atl/reference/ccomsafearraybound-class),
+[IObjectSafetyImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/iobjectsafetyimpl-class).

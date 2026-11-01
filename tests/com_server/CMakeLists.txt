@@ -36,7 +36,7 @@ execute_process(COMMAND "${Python3_EXECUTABLE}"
   COMMAND_ERROR_IS_FATAL ANY)
 
 add_executable(openatl_com_server_tests
-  server.cpp atl_compat.cpp atl_module.cpp atl_dispatch.cpp
+  server.cpp atl_compat.cpp atl_safearray.cpp atl_module.cpp atl_dispatch.cpp
   atl_typelib_file.cpp rgs_parser_tests.cpp rgs_registry_tests.cpp interfaces.h
   "${_openatl_fixture_rc}")
 target_include_directories(openatl_com_server_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
@@ -179,12 +179,35 @@ if(CMAKE_HOST_WIN32)
       "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
     COMMENT "Actual Windows SDK MIDL: original Microsoft Aggreg.idl"
     VERBATIM)
+  # The unchanged ArrayManager uses native SAFEARRAY/VARIANT Automation.
+  set(_openatl_safe_original "${PROJECT_SOURCE_DIR}/tests/official_samples/microsoft_atl/atlsafearray")
+  set(_openatl_safe_generated "${CMAKE_CURRENT_BINARY_DIR}/microsoft-atlsafearray")
+  file(MAKE_DIRECTORY "${_openatl_safe_generated}")
+  add_custom_command(
+    OUTPUT "${_openatl_safe_generated}/AtlSafeArray.h"
+           "${_openatl_safe_generated}/AtlSafeArray_i.c"
+           "${_openatl_safe_generated}/AtlSafeArray.tlb"
+    COMMAND "${OPENATL_COMMAP_MIDL_EXECUTABLE}" /nologo /env ${_openatl_midl_env}
+      ${_openatl_midl_cpp_args} ${_openatl_midl_include_flags}
+      /out "${_openatl_safe_generated}" /h AtlSafeArray.h
+      /iid AtlSafeArray_i.c /tlb AtlSafeArray.tlb "${_openatl_safe_original}/AtlSafeArray.idl"
+    COMMAND "${CMAKE_COMMAND}" "-DOPENATL_MIDL_MINGW=${MINGW}"
+      "-DOPENATL_MIDL_HEADER=${_openatl_safe_generated}/AtlSafeArray.h"
+      -P "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+    DEPENDS "${_openatl_safe_original}/AtlSafeArray.idl"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
+    COMMENT "Actual Windows SDK MIDL: original Microsoft AtlSafeArray.idl"
+    VERBATIM)
   add_custom_target(openatl_microsoft_commap_midl ALL DEPENDS
     "${_openatl_commap_header}" "${_openatl_commap_iid}"
     "${_openatl_commap_tlb}"
     "${_openatl_aggreg_generated}/Aggreg.h"
     "${_openatl_aggreg_generated}/aggreg_i.c"
-    "${_openatl_aggreg_generated}/Aggreg.tlb")
+    "${_openatl_aggreg_generated}/Aggreg.tlb"
+    "${_openatl_safe_generated}/AtlSafeArray.h"
+    "${_openatl_safe_generated}/AtlSafeArray_i.c"
+    "${_openatl_safe_generated}/AtlSafeArray.tlb")
   add_dependencies(openatl_com_server_tests openatl_microsoft_commap_midl)
   set_source_files_properties("${_openatl_commap_iid}"
     PROPERTIES GENERATED TRUE LANGUAGE CXX)
@@ -199,13 +222,13 @@ if(CMAKE_HOST_WIN32)
   # Target ordering makes the TypeLib available before Windows RC runs.
   set(_openatl_embedded_rc "${CMAKE_CURRENT_BINARY_DIR}/fixture_typelib.rc")
   file(WRITE "${_openatl_embedded_rc}"
-    "1 TYPELIB \"${_openatl_commap_tlb}\"\n2 TYPELIB \"${_openatl_aggreg_generated}/Aggreg.tlb\"\n")
+    "1 TYPELIB \"${_openatl_commap_tlb}\"\n2 TYPELIB \"${_openatl_aggreg_generated}/Aggreg.tlb\"\n3 TYPELIB \"${_openatl_safe_generated}/AtlSafeArray.tlb\"\n")
   target_sources(openatl_com_server_fixture PRIVATE
     "${_openatl_embedded_rc}" "${_openatl_commap_iid}")
   target_sources(openatl_com_server_tests PRIVATE
     "${_openatl_embedded_rc}" embedded_dispatch.cpp)
   set_source_files_properties("${_openatl_embedded_rc}" PROPERTIES
-    OBJECT_DEPENDS "${_openatl_commap_tlb};${_openatl_aggreg_generated}/Aggreg.tlb")
+    OBJECT_DEPENDS "${_openatl_commap_tlb};${_openatl_aggreg_generated}/Aggreg.tlb;${_openatl_safe_generated}/AtlSafeArray.tlb")
   add_dependencies(openatl_com_server_fixture openatl_microsoft_commap_midl)
   target_include_directories(openatl_com_server_fixture PRIVATE
     "${_openatl_commap_generated}")
