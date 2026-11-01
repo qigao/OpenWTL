@@ -17,7 +17,7 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | --- | --- |
 | `atlbase.h`, `atlcomcli.h` | Existing Win32 modules, threading policies, COM smart pointers, BSTR/VARIANT helpers |
 | `atlwin.h`, `atlstr.h`, utility headers | Existing documented Windows/WTL subset; Unicode-only, C++17 |
-| `atlhost.h`, `atliface.h` | Windowed OLE containment, `CAxWindow`/`CAxWindow2`, site/ambient interfaces and explicit control creation; see [ownership contract](ACTIVEX_HOST.md) |
+| `atlhost.h`, `atliface.h` | Windowed OLE containment, `CAxWindow`/`CAxWindow2`, site/ambient interfaces, external UI dispatch delegation and explicit control creation; see [ownership contract](ACTIVEX_HOST.md) |
 | `atlsafe.h`: `CComSafeArray<T, VARTYPE>`, `CComSafeArrayBound` | Native OLEAUT32 array creation, deep copy, attach/detach, checked borrowed element access, copied/transferred resource elements, append, multidimensional access and resize. Explicit destruction preserves ownership on native failure. See SAFEARRAY scope below. |
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
@@ -514,6 +514,52 @@ References: [IDispEventImpl](https://learn.microsoft.com/en-us/cpp/atl/reference
 [IProvideClassInfo](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nn-ocidl-iprovideclassinfo),
 [IPersist](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nn-objidl-ipersist),
 [sink-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-macros).
+
+## External host UI
+
+The public IDocHostUIHandlerDispatch declaration follows the ATL containment
+IDL, including its UUID, 15-method order, pointer-sized accelerator values and
+separate HRESULT result outputs. CAxWindow/CAxWindow2 expose SetExternalDispatch
+and SetExternalUIHandler through the existing IAxWinHostWindow interface.
+The latter accepts the documented dispatch interface directly; implementing
+native IDocHostUIHandler on the same object is no longer required. The host
+uses typed COM calls, not a guessed IDispatch name/DISPID table. Applications
+remain responsible for their handler's IDispatch implementation and marshaling.
+
+An owned adapter forwards native MSHTML UI calls. ShowContextMenu, ShowUI and
+TranslateAccelerator return the dispatch method's HRESULT output on successful
+transport, or the transport failure itself. An omitted result defaults to S_FALSE.
+GetHostInfo starts with the host's ambient flags and double-click policy.
+BOOL inputs become VARIANT_BOOL; accelerator handles/WPARAM/LPARAM retain their
+width and the command-group GUID becomes an optional BSTR. BSTR input/output
+temporaries are owned for the call. Native option-key/URL outputs use a separate
+CoTaskMem allocation; failed outputs remain null. Drop targets and data objects
+are obtained with native QueryInterface, preserving multiple-inheritance pointer
+adjustments and releasing intermediate results, including failed calls.
+
+Every delegated call retains the adapter and its handler through completion;
+replacement, clearing and HWND destruction from a callback cannot retire the
+handler while it is executing. The adapter pins the active ATL module. Setters
+reject another thread, recheck HWND retirement after retaining an external
+object, and allow clearing through a retained host interface after destruction.
+Clearing the UI handler restores the existing ambient/default behavior and
+external dispatch object. Windowless activation, OLE menu merging, property
+frames and full composite controls are separate unfinished work.
+
+Existing lifecycle cases call all 15 native UI methods with a dispatch-only
+handler, verify negative coordinates, high-bit accelerator values, native string
+allocators, interface identity/ownership, null and failed outputs, transport vs
+callback status, wrong-thread mutation and reentrant replacement/retirement.
+The existing real WebBrowser case obtains IHTMLWindow2::external from the loaded
+MSHTML document and invokes the application's Automation property. Executables,
+modes, stdout/stderr contracts, timeout budgets and workflows are unchanged;
+real printing and hardware HSP remain outside CI. The 36 original Microsoft
+blobs and the whole-application admission graph are unchanged.
+
+References: [IDocHostUIHandlerDispatch](https://learn.microsoft.com/en-us/cpp/atl/reference/idochostuihandlerdispatch-interface),
+[CAxWindow setters](https://learn.microsoft.com/en-us/cpp/atl/reference/caxwindow-class),
+[native host UI contract](https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa753260(v=vs.85)),
+[MSHTML external object](https://learn.microsoft.com/en-us/previous-versions/aa741462(v=vs.85)).
 
 ## Sink-map subscriptions
 

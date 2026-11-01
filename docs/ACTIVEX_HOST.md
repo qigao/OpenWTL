@@ -97,7 +97,16 @@ implemented. Windowless activation is explicitly
 declined through QueryInterface and its property setter. Returning S_FALSE from
 host UI methods requests the control's standard UI; it does not fabricate an
 implemented feature. Full official Microsoft ATL compatibility remains pending.
-`SetExternalUIHandler` currently requires an object also exposing native
-`IDocHostUIHandler`; a dispatch-only UI handler adapter is still pending.
+`CAxWindow::SetExternalUIHandler` and the host interface accept the documented
+`IDocHostUIHandlerDispatch` contract. The handler need not implement native
+`IDocHostUIHandler`. All 15 native UI callbacks delegate through a retained
+adapter, including modeless notifications. HRESULT return-value outputs are
+distinct from transport failures. BSTR results are copied into CoTaskMem strings;
+drop-target/data-object results are queried for the actual native interface.
+The application supplies its handler's IDispatch implementation; no TypeLib is
+generated or registered by the host. `CAxWindow::SetExternalDispatch` supplies
+the default external object when no UI handler is installed. Setters belong to
+the window thread; retained host interfaces may clear these objects after HWND
+retirement. See [external host UI](ATL_COMPATIBILITY.md#external-host-ui).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.

@@ -5,6 +5,7 @@
 #include <thread>
 #include <algorithm>
 bool RunHostLifecycleTests();
+bool RunBrowserUIHandlerTest(ATL::CAxWindow&, IHTMLDocument2*);
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
 bool RunMicrosoftCommapClassTests();
 bool RunMicrosoftSafeArrayTests();
@@ -810,6 +811,7 @@ bool browser() {
         CHECK(browser->get_Document(&document) == S_OK);
         ATL::CComQIPtr<IHTMLDocument2> html = document;
         CHECK(html.p != nullptr);
+        CHECK(RunBrowserUIHandlerTest(window, html));
         html.Release(); html = document;
         CHECK(html.p != nullptr);
         CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK);

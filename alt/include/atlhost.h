@@ -27,6 +27,116 @@ inline HRESULT RegisteredClassId(LPCOLESTR name, CLSID* id) noexcept {
     if (status == ERROR_SUCCESS) status = clsid.QueryStringValue(nullptr, value, &length);
     return status == ERROR_SUCCESS ? ::CLSIDFromString(value, id) : HRESULT_FROM_WIN32(status);
 }
+// Adapt the public ATL UI dispatch contract to the native MSHTML site ABI.
+// The host retains this adapter across each call, including reentrant removal.
+class AxUIHandler : private AtlObjectModulePin, public IDocHostUIHandler {
+public:
+    explicit AxUIHandler(IDocHostUIHandlerDispatch* handler) noexcept : handler_(handler) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IDocHostUIHandler) return E_NOINTERFACE;
+        *output = static_cast<IDocHostUIHandler*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ::InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG count = ::InterlockedDecrement(&refs_);
+        if (!count) delete this;
+        return count;
+    }
+    HRESULT STDMETHODCALLTYPE ShowContextMenu(DWORD id, POINT* point, IUnknown* command, IDispatch* reserved) override {
+        if (!point) return E_POINTER;
+        HRESULT result = S_FALSE;
+        const HRESULT hr = handler_->ShowContextMenu(id, static_cast<DWORD>(point->x), static_cast<DWORD>(point->y), command, reserved, &result);
+        return FAILED(hr) ? hr : result;
+    }
+    HRESULT STDMETHODCALLTYPE GetHostInfo(DOCHOSTUIINFO* info) override {
+        if (!info) return E_POINTER;
+        return handler_->GetHostInfo(&info->dwFlags, &info->dwDoubleClick);
+    }
+    HRESULT STDMETHODCALLTYPE ShowUI(DWORD id, IOleInPlaceActiveObject* active, IOleCommandTarget* target,
+                                     IOleInPlaceFrame* frame, IOleInPlaceUIWindow* document) override {
+        HRESULT result = S_FALSE;
+        const HRESULT hr = handler_->ShowUI(id, active, target, frame, document, &result);
+        return FAILED(hr) ? hr : result;
+    }
+    HRESULT STDMETHODCALLTYPE HideUI() override { return handler_->HideUI(); }
+    HRESULT STDMETHODCALLTYPE UpdateUI() override { return handler_->UpdateUI(); }
+    HRESULT STDMETHODCALLTYPE EnableModeless(BOOL enable) override { return handler_->EnableModeless(enable ? VARIANT_TRUE : VARIANT_FALSE); }
+    HRESULT STDMETHODCALLTYPE OnDocWindowActivate(BOOL active) override { return handler_->OnDocWindowActivate(active ? VARIANT_TRUE : VARIANT_FALSE); }
+    HRESULT STDMETHODCALLTYPE OnFrameWindowActivate(BOOL active) override { return handler_->OnFrameWindowActivate(active ? VARIANT_TRUE : VARIANT_FALSE); }
+    HRESULT STDMETHODCALLTYPE ResizeBorder(LPCRECT rect, IOleInPlaceUIWindow* window, BOOL frame) override {
+        if (!rect) return E_POINTER;
+        return handler_->ResizeBorder(rect->left, rect->top, rect->right, rect->bottom, window, frame ? VARIANT_TRUE : VARIANT_FALSE);
+    }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG message, const GUID* group, DWORD id) override {
+        if (!message) return E_POINTER;
+        CComBSTR command;
+        if (group) {
+            WCHAR text[39]{};
+            if (!::StringFromGUID2(*group, text, 39)) return E_INVALIDARG;
+            command.Attach(::SysAllocStringLen(text, 38));
+            if (!command.m_str) return E_OUTOFMEMORY;
+        }
+        HRESULT result = S_FALSE;
+        const HRESULT hr = handler_->TranslateAccelerator(reinterpret_cast<DWORD_PTR>(message->hwnd), message->message,
+            static_cast<DWORD_PTR>(message->wParam), static_cast<DWORD_PTR>(message->lParam), command, id, &result);
+        return FAILED(hr) ? hr : result;
+    }
+    HRESULT STDMETHODCALLTYPE GetOptionKeyPath(LPOLESTR* output, DWORD flags) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComBSTR value;
+        const HRESULT hr = handler_->GetOptionKeyPath(&value.m_str, flags);
+        return FAILED(hr) ? hr : CopyString(value, output, hr);
+    }
+    HRESULT STDMETHODCALLTYPE GetDropTarget(IDropTarget* original, IDropTarget** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComPtr<IUnknown> value;
+        const HRESULT hr = handler_->GetDropTarget(original, &value);
+        if (FAILED(hr) || !value) return hr;
+        const HRESULT query = value->QueryInterface(IID_IDropTarget, reinterpret_cast<void**>(output));
+        return FAILED(query) ? query : hr;
+    }
+    HRESULT STDMETHODCALLTYPE GetExternal(IDispatch** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComPtr<IDispatch> value;
+        const HRESULT hr = handler_->GetExternal(&value);
+        if (SUCCEEDED(hr)) *output = value.Detach();
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE TranslateUrl(DWORD flags, OLECHAR* input, OLECHAR** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComBSTR source(input), value;
+        if (input && !source.m_str) return E_OUTOFMEMORY;
+        const HRESULT hr = handler_->TranslateUrl(flags, source, &value.m_str);
+        return FAILED(hr) ? hr : CopyString(value, output, hr);
+    }
+    HRESULT STDMETHODCALLTYPE FilterDataObject(IDataObject* original, IDataObject** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        CComPtr<IUnknown> value;
+        const HRESULT hr = handler_->FilterDataObject(original, &value);
+        if (FAILED(hr) || !value) return hr;
+        const HRESULT query = value->QueryInterface(IID_IDataObject, reinterpret_cast<void**>(output));
+        return FAILED(query) ? query : hr;
+    }
+private:
+    static HRESULT CopyString(BSTR value, LPOLESTR* output, HRESULT result) noexcept {
+        if (!value) return result;
+        const SIZE_T length = ::SysStringLen(value);
+        if (length > SIZE_T(-1) / sizeof(WCHAR) - 1) return E_OUTOFMEMORY;
+        const SIZE_T bytes = (length + 1) * sizeof(WCHAR);
+        *output = static_cast<LPOLESTR>(::CoTaskMemAlloc(bytes));
+        if (!*output) return E_OUTOFMEMORY;
+        std::memcpy(*output, value, bytes); return result;
+    }
+    LONG refs_ = 1;
+    CComPtr<IDocHostUIHandlerDispatch> handler_;
+};
 class AxHost : private AtlObjectModulePin, public IOleClientSite, public IOleInPlaceSite,
                public IOleInPlaceFrame, public IOleControlSite,
                public IAxWinAmbientDispatch, public IAxWinHostWindow,
@@ -228,15 +338,25 @@ public:
         if (FAILED(hr)) return hr;
         return control_ ? control_->QueryInterface(iid, output) : E_NOINTERFACE;
     }
-    HRESULT STDMETHODCALLTYPE SetExternalDispatch(IDispatch* dispatch) override { external_ = dispatch; return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetExternalDispatch(IDispatch* dispatch) override {
+        if (thread_ != ::GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+        if (dispatch) { const HRESULT hr = CheckWindow(); if (FAILED(hr)) return hr; }
+        CComPtr<IUnknown> keep(static_cast<IOleClientSite*>(this));
+        CComPtr<IDispatch> replacement = dispatch;
+        if (dispatch) { const HRESULT hr = CheckWindow(); if (FAILED(hr)) return hr; }
+        external_ = replacement; return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE SetExternalUIHandler(IDocHostUIHandlerDispatch* handler) override {
-        if (!handler) { ui_.Release(); return S_OK; }
-        // A native handler supplied by the same COM object can be delegated
-        // without member-pointer/vtable casts or a second hosting engine.
-        CComPtr<IDocHostUIHandler> native;
-        HRESULT hr = reinterpret_cast<IUnknown*>(handler)->QueryInterface(IID_IDocHostUIHandler, reinterpret_cast<void**>(&native));
-        if (SUCCEEDED(hr)) ui_ = native;
-        return hr;
+        if (thread_ != ::GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+        if (handler) { const HRESULT hr = CheckWindow(); if (FAILED(hr)) return hr; }
+        CComPtr<IUnknown> keep(static_cast<IOleClientSite*>(this));
+        CComPtr<IDocHostUIHandler> replacement;
+        if (handler) {
+            replacement.Attach(new (std::nothrow) AxUIHandler(handler));
+            if (!replacement) return E_OUTOFMEMORY;
+            const HRESULT hr = CheckWindow(); if (FAILED(hr)) return hr;
+        }
+        ui_ = replacement; return S_OK;
     }
 
     // IOleClientSite / IOleInPlaceSite / IOleInPlaceFrame
@@ -288,7 +408,9 @@ public:
     HRESULT STDMETHODCALLTYPE SetMenu(HMENU, HOLEMENU, HWND) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE RemoveMenus(HMENU) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetStatusText(LPCOLESTR) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE EnableModeless(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE EnableModeless(BOOL enable) override {
+        CComPtr<IDocHostUIHandler> handler = ui_; return handler ? handler->EnableModeless(enable) : S_OK;
+    }
     HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG, WORD) override { return S_FALSE; }
     // IOleControlSite
     HRESULT STDMETHODCALLTYPE OnControlInfoChanged() override { return S_OK; }
@@ -368,9 +490,9 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetHostInfo(DOCHOSTUIINFO* info) override {
         if (!info) return E_POINTER;
-        CComPtr<IDocHostUIHandler> handler = ui_; if (handler) return handler->GetHostInfo(info);
         info->cbSize = sizeof(*info); info->dwFlags = docFlags_; info->dwDoubleClick = doubleClick_;
-        info->pchHostCss = nullptr; info->pchHostNS = nullptr; return S_OK;
+        info->pchHostCss = nullptr; info->pchHostNS = nullptr;
+        CComPtr<IDocHostUIHandler> handler = ui_; return handler ? handler->GetHostInfo(info) : S_OK;
     }
     HRESULT STDMETHODCALLTYPE ShowUI(DWORD id, IOleInPlaceActiveObject* active, IOleCommandTarget* target,
                                      IOleInPlaceFrame* frame, IOleInPlaceUIWindow* document) override {
@@ -780,6 +902,16 @@ public:
         return AtlAxCreateControlEx(name, this->m_hWnd, stream, host, control, iid, sink);
     }
     HRESULT AttachControl(IUnknown* control, IUnknown** host = nullptr) noexcept { return AtlAxAttachControl(control, this->m_hWnd, host); }
+    HRESULT SetExternalDispatch(IDispatch* dispatch) noexcept {
+        CComPtr<IAxWinHostWindow> host;
+        const HRESULT hr = QueryHost(&host);
+        return FAILED(hr) ? hr : host->SetExternalDispatch(dispatch);
+    }
+    HRESULT SetExternalUIHandler(IDocHostUIHandlerDispatch* handler) noexcept {
+        CComPtr<IAxWinHostWindow> host;
+        const HRESULT hr = QueryHost(&host);
+        return FAILED(hr) ? hr : host->SetExternalUIHandler(handler);
+    }
 };
 using CAxWindow = CAxWindowT<CWindow>;
 
