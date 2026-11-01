@@ -571,7 +571,7 @@ Create (including the RECT overload), DoModal, DestroyWindow, EndDialog,
 GetDialogProc, GetIDD and AdviseSinkMap are available; native IsDialogMessage
 is inherited. AtlAxCreateDialog and AtlAxDialogBox provide the corresponding
 resource-name/ID entry points. They register the existing AxWin classes without
-initializing COM, then use native CreateDialogParamW/DialogBoxParamW.
+initializing COM, then use native resource or indirect dialog creation APIs.
 
 Supported resources directly name AtlAxWin140/AtlAxWinLic140 host classes and a
 control CLSID, ProgID or supported URL as the control's text. Windows creates
@@ -590,11 +590,23 @@ returns NULL; normal modal EndDialog returns its result. Thunk setup failures
 use the shared dialog failure hook and terminate the appropriate native creation
 path. Existing pending-data removal and deferred final notification are reused.
 
-DLGINIT stream/license records and CLSID-class placeholder splitting are not
-implemented. Resources with DLGINIT data or DS_NOFAILCREATE fail early with
-ERROR_NOT_SUPPORTED; unknown native child classes fail through Windows.
+Literal CLSID control classes with empty titles and no inline creation data are
+converted to AtlAxWin140 with the original CLSID as the control's text. A bounded
+reader validates standard/extended headers, version, item count, strings,
+ordinals, fonts, DWORD alignment and creation-data spans before creating any
+window. Header and fixed control records preserve styles, help IDs, identifiers
+and geometry. Ordinary class/title/creation-data records stay opaque and retain
+their bytes; standard creation-data counts include their size word, while
+extended counts exclude it. Input resources are never modified. Only converted
+templates use owned DWORD-aligned storage with CreateDialogIndirectParamW or
+DialogBoxIndirectParamW; unchanged resources retain their original native path.
+
+Malformed/truncated templates and malformed brace-prefixed CLSID classes fail
+ERROR_INVALID_DATA. Nonempty placeholder titles or inline ActiveX creation data,
+DLGINIT stream/license records and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
+Unknown ordinary native child classes fail through Windows.
 Unimplemented resource initialization is not silently skipped. Full resource
-editor persistence/licensing, control-splitting/property pages, advanced OLE
+editor persistence/licensing, full control-splitting/property pages, advanced OLE
 accelerators and full composite controls remain open. Header-independent and
 exact internal layout compatibility remain unqualified.
 
@@ -607,6 +619,15 @@ control cannot activate. The executable, test modes, original 25-second budgets,
 workflow and stdout markers are unchanged. All 36 pinned original blobs remain
 byte-checked; printing and hardware HSP stay outside CI.
 
+The CLSID-class paths additionally verify standard/extended and named resources,
+round trips, unchanged original bytes, ordinary creation-data preservation,
+truncated/corrupt records, help/style/ID retention, actual WebBrowser events in
+both modal/modeless paths and cleanup after a later converted control fails.
+
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
+Wire formats: [standard header](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-dlgtemplate),
+[standard item](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-dlgitemtemplate),
+[extended header](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgtemplateex),
+[extended item](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgitemtemplateex).

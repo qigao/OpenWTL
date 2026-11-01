@@ -10,6 +10,7 @@
 #include <exdisp.h>
 #include <new>
 #include <cstring>
+#include "openatl/atl_dialog_template.h"
 
 namespace ATL {
 namespace detail {
@@ -477,25 +478,19 @@ inline BOOL WINAPI AtlAxWinTerm() noexcept {
     return regular && licensed;
 }
 namespace detail {
-inline BOOL PrepareAxDialog(HINSTANCE instance, LPCWSTR name) noexcept {
+inline BOOL PrepareAxDialog(HINSTANCE instance, LPCWSTR name, AxDialogTemplate& prepared) noexcept {
     if (!name) { ::SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     const HRSRC resource = ::FindResourceW(instance, name, MAKEINTRESOURCEW(5));
     if (!resource) return FALSE;
     const DWORD size = ::SizeofResource(instance, resource);
     const HGLOBAL loaded = ::LoadResource(instance, resource);
     const auto bytes = static_cast<const BYTE*>(::LockResource(loaded));
-    if (!bytes || size < sizeof(DLGTEMPLATE)) { ::SetLastError(ERROR_INVALID_DATA); return FALSE; }
-    WORD signature = 0; DWORD style = 0;
-    std::memcpy(&signature, bytes + sizeof(WORD), sizeof(signature));
-    if (signature == 0xFFFF) {
-        if (size < sizeof(_DialogSplitHelper::DLGTEMPLATEEX)) { ::SetLastError(ERROR_INVALID_DATA); return FALSE; }
-        std::memcpy(&style, bytes + 12, sizeof(style));
-    } else std::memcpy(&style, bytes, sizeof(style));
-    // Persistence streams, license records and CLSID-placeholder splitting
-    // are not implemented. Never silently omit their initialization data.
-    if ((style & DS_NOFAILCREATE) || ::FindResourceW(instance, name, MAKEINTRESOURCEW(240))) {
+    // Stream/license initialization remains unsupported and is never omitted.
+    if (::FindResourceW(instance, name, MAKEINTRESOURCEW(240))) {
         ::SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
     }
+    const DWORD error = BuildAxDialogTemplate(bytes, size, prepared);
+    if (error) { ::SetLastError(error); return FALSE; }
     return AtlAxWinInit();
 }
 inline DWORD AxDialogError(HRESULT hr) noexcept {
@@ -509,12 +504,16 @@ template<class T> struct HasAxSinkMap<T, std::void_t<decltype(T::_GetSinkMap())>
 }
 inline HWND WINAPI AtlAxCreateDialog(HINSTANCE instance, LPCWSTR name, HWND parent,
     DLGPROC procedure, LPARAM parameter) noexcept {
-    if (!detail::PrepareAxDialog(instance, name)) return nullptr;
+    detail::AxDialogTemplate prepared;
+    if (!detail::PrepareAxDialog(instance, name, prepared)) return nullptr;
+    if (prepared.converted) return ::CreateDialogIndirectParamW(instance, prepared.Get(), parent, procedure, parameter);
     return ::CreateDialogParamW(instance, name, parent, procedure, parameter);
 }
 inline int WINAPI AtlAxDialogBox(HINSTANCE instance, LPCWSTR name, HWND parent,
     DLGPROC procedure, LPARAM parameter) noexcept {
-    if (!detail::PrepareAxDialog(instance, name)) return -1;
+    detail::AxDialogTemplate prepared;
+    if (!detail::PrepareAxDialog(instance, name, prepared)) return -1;
+    if (prepared.converted) return static_cast<int>(::DialogBoxIndirectParamW(instance, prepared.Get(), parent, procedure, parameter));
     return static_cast<int>(::DialogBoxParamW(instance, name, parent, procedure, parameter));
 }
 inline HRESULT WINAPI AtlAxGetHost(HWND window, IUnknown** output) noexcept {

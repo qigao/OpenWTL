@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#include <algorithm>
 bool RunHostLifecycleTests();
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
 bool RunMicrosoftCommapClassTests();
@@ -12,6 +13,77 @@ bool RunMicrosoftSafeArrayTests();
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ACTIVEX_FAIL line=%d: %s hr=%08lx\n", __LINE__, #x, static_cast<unsigned long>(::GetLastError())); return false; } } while (0)
 namespace {
 inline constexpr IID EventIID = {0x56b852d1,0xe47c,0x48a6,{0x94,0x1b,0xde,0xae,0x8c,0x6d,0x08,0xfb}};
+size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
+    const auto first = static_cast<const BYTE*>(value);
+    return static_cast<size_t>(std::search(bytes.begin(), bytes.end(), first, first + size) - bytes.begin());
+}
+bool dialogTemplates() {
+    using ATL::detail::AxDialogTemplate;
+    using ATL::detail::BuildAxDialogTemplate;
+    const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
+    const WCHAR clsid[] = L"{8856F961-340A-11D0-A96B-00C04FD705A2}";
+    const WCHAR sibling[] = L"resource sibling";
+    const WORD staticClass[] = {0xFFFF, 0x82};
+    for (WORD id : {WORD(602), WORD(606), WORD(607)}) {
+        HRSRC resource = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        CHECK(resource);
+        const DWORD size = ::SizeofResource(instance, resource);
+        auto original = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, resource)));
+        CHECK(original && size > 8);
+        const std::vector<BYTE> snapshot(original, original + size);
+        AxDialogTemplate built;
+        CHECK(BuildAxDialogTemplate(original, size, built) == ERROR_SUCCESS && built.converted == (id != 602));
+        CHECK(std::memcmp(original, snapshot.data(), size) == 0 && reinterpret_cast<UINT_PTR>(built.Get()) % 4 == 0);
+        AxDialogTemplate again;
+        CHECK(BuildAxDialogTemplate(built.storage.data(), built.size, again) == ERROR_SUCCESS && !again.converted);
+        CHECK(again.size == built.size && std::memcmp(again.storage.data(), built.storage.data(), built.size) == 0);
+        if (id == 602) {
+            CHECK(built.size == size && std::memcmp(built.storage.data(), original, size) == 0);
+            continue;
+        }
+        const auto converted = reinterpret_cast<const BYTE*>(built.storage.data());
+        std::vector<BYTE> bytes(converted, converted + built.size);
+        const size_t cls = DialogBytesFind(snapshot, clsid, sizeof(clsid));
+        const size_t oldStatic = DialogBytesFind(snapshot, staticClass, sizeof(staticClass));
+        const size_t newStatic = DialogBytesFind(bytes, staticClass, sizeof(staticClass));
+        const size_t fixed = id == 606 ? 24 : 18;
+        CHECK(cls < size && oldStatic >= fixed && oldStatic < size && newStatic >= fixed && newStatic < bytes.size());
+        CHECK(std::memcmp(original, converted, cls) == 0); // Header/font and first fixed record.
+        CHECK(size - oldStatic == bytes.size() - newStatic);
+        CHECK(std::memcmp(original + oldStatic - fixed, converted + newStatic - fixed, size - oldStatic + fixed) == 0);
+        for (size_t cut = 0; cut <= size - 8; ++cut) {
+            CHECK(BuildAxDialogTemplate(original, cut, again) == ERROR_INVALID_DATA && again.storage.empty() && !again.converted && !again.size);
+        }
+        std::vector<BYTE> bad = snapshot;
+        const WORD tooMany = 3;
+        std::memcpy(bad.data() + (id == 606 ? 16 : 8), &tooMany, sizeof(tooMany));
+        CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA);
+        bad = snapshot; const WCHAR invalidHex = L'G';
+        std::memcpy(bad.data() + cls + sizeof(WCHAR), &invalidHex, sizeof(invalidHex));
+        CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA);
+        bad = snapshot; const WORD inlineData = 4;
+        std::memcpy(bad.data() + cls + sizeof(clsid) + sizeof(WORD), &inlineData, sizeof(inlineData));
+        CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_NOT_SUPPORTED);
+        // Creation data for ordinary controls remains opaque. Standard counts
+        // include their size word; extended counts exclude it (Win32 contract).
+        const size_t label = DialogBytesFind(snapshot, sibling, sizeof(sibling));
+        CHECK(label < size);
+        const size_t extra = label + sizeof(sibling);
+        bad.assign(snapshot.begin(), snapshot.begin() + extra + sizeof(WORD));
+        const WORD payloadSize = id == 606 ? 3 : 5;
+        std::memcpy(bad.data() + extra, &payloadSize, sizeof(payloadSize));
+        const BYTE payload[] = {0xA1, 0xB2, 0xC3};
+        bad.insert(bad.end(), payload, payload + sizeof(payload));
+        CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_SUCCESS && again.converted);
+        CHECK(std::memcmp(reinterpret_cast<const BYTE*>(again.storage.data()) + again.size - sizeof(payload), payload, sizeof(payload)) == 0);
+        if (id == 606) {
+            bad = snapshot; const WORD unsupportedVersion = 2;
+            std::memcpy(bad.data(), &unsupportedVersion, sizeof(unsupportedVersion));
+            CHECK(BuildAxDialogTemplate(bad.data(), bad.size(), again) == ERROR_INVALID_DATA);
+        }
+    }
+    return true;
+}
 struct FreeDialogState { bool modal = false; int initialized = 0; HWND window = nullptr; };
 INT_PTR CALLBACK FreeDialogProc(HWND window, UINT message, WPARAM, LPARAM parameter) {
     if (message != WM_INITDIALOG) return FALSE;
@@ -91,7 +163,7 @@ bool plainDialogs() {
     CHECK(ATL::AtlAxDialogBox(instance, L"OPENATL_PLAIN", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free)) == 83 && free.initialized == 2);
     CHECK(!ATL::AtlAxCreateDialog(instance, nullptr, nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_INVALID_PARAMETER);
     CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(999), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() != ERROR_SUCCESS);
-    for (WORD id : {WORD(604), WORD(605)}) {
+    for (WORD id : {WORD(604), WORD(605), WORD(609)}) {
         CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_NOT_SUPPORTED);
         CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == ERROR_NOT_SUPPORTED);
     }
@@ -260,6 +332,8 @@ class ControlDialog : public ATL::CAxDialogImpl<ControlDialog>,
                       public ATL::IDispEventImpl<701, ControlDialog, &DIID_DWebBrowserEvents2> {
 public:
     enum { IDD = 601 };
+    int resource = IDD;
+    int GetIDD() noexcept { return resource; }
     bool modal = false, good = true;
     int initialized = 0, finalized = 0, documents = 0;
     LPARAM parameter = 0;
@@ -270,6 +344,14 @@ public:
     LRESULT Init(UINT, WPARAM, LPARAM value, BOOL&) {
         ++initialized; parameter = value;
         good = GetDlgControl(701, IID_IWebBrowser2, reinterpret_cast<void**>(&control.p)) == S_OK;
+        if (resource == 606 || resource == 607) {
+            WCHAR name[32]{}, text[32]{};
+            const HWND host = ::GetDlgItem(this->m_hWnd, 701);
+            good = good && ::GetClassNameW(host, name, 32) && std::wcscmp(name, L"AtlAxWin140") == 0;
+            good = good && (::GetWindowLongPtrW(host, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) != 0;
+            good = good && ::GetDlgCtrlID(host) == 701 && ::GetDlgItemTextW(this->m_hWnd, 704, text, 32) && std::wcscmp(text, L"resource sibling") == 0;
+            if (resource == 606) good = good && ::GetWindowContextHelpId(host) == 273;
+        }
         good = good && ::SetTimer(this->m_hWnd, 1, 4500, nullptr) != 0;
         ::PostMessageW(this->m_hWnd, WM_APP + 81, 0, 0);
         return TRUE;
@@ -301,6 +383,8 @@ public:
 class MissingControlDialog : public ATL::CAxDialogImpl<MissingControlDialog> {
 public:
     enum { IDD = 603 };
+    int resource = IDD;
+    int GetIDD() noexcept { return resource; }
     int initialized = 0;
     LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) { ++initialized; return TRUE; }
     BEGIN_MSG_MAP(MissingControlDialog)
@@ -308,25 +392,37 @@ public:
     END_MSG_MAP()
 };
 bool controlDialogs(ATL::CAtlModule& module) {
-    ControlDialog modeless;
-    CHECK(modeless.Create(nullptr, 312) && modeless.initialized == 1 && modeless.parameter == 312);
-    CHECK(modeless.AdviseSinkMap(true) == CONNECT_E_ADVISELIMIT);
-    const ULONGLONG deadline = ::GetTickCount64() + 6000;
-    while (!modeless.documents && modeless.m_hWnd && ::GetTickCount64() < deadline) {
-        MSG message{};
-        while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            if (!modeless.IsDialogMessage(&message)) { ::TranslateMessage(&message); ::DispatchMessageW(&message); }
+    for (WORD resource : {WORD(601), WORD(606), WORD(607)}) {
+        ControlDialog modeless;
+        modeless.resource = resource;
+        CHECK(modeless.Create(nullptr, 312) && modeless.initialized == 1 && modeless.parameter == 312);
+        CHECK(modeless.AdviseSinkMap(true) == CONNECT_E_ADVISELIMIT);
+        const ULONGLONG deadline = ::GetTickCount64() + 6000;
+        while (!modeless.documents && modeless.m_hWnd && ::GetTickCount64() < deadline) {
+            MSG message{};
+            while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (!modeless.IsDialogMessage(&message)) { ::TranslateMessage(&message); ::DispatchMessageW(&message); }
+            }
+            ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
         }
-        ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+        CHECK(modeless.good && modeless.documents && modeless.DestroyWindow() && modeless.finalized == 1 && !modeless.m_hWnd);
+        CHECK(modeless.AdviseSinkMap(false) == S_OK && module.GetLockCount() == 0);
+        ControlDialog modal; modal.modal = true; modal.resource = resource;
+        CHECK(modal.DoModal(nullptr, 728) == 73 && modal.good && modal.documents && modal.initialized == 1 && modal.parameter == 728 && modal.finalized == 1 && !modal.m_hWnd);
+        CHECK(module.GetLockCount() == 0);
     }
-    CHECK(modeless.good && modeless.documents && modeless.DestroyWindow() && modeless.finalized == 1 && !modeless.m_hWnd);
-    CHECK(modeless.AdviseSinkMap(false) == S_OK && module.GetLockCount() == 0);
-    ControlDialog modal; modal.modal = true;
-    CHECK(modal.DoModal(nullptr, 728) == 73 && modal.good && modal.documents && modal.initialized == 1 && modal.parameter == 728 && modal.finalized == 1 && !modal.m_hWnd);
-    CHECK(module.GetLockCount() == 0);
-    MissingControlDialog missing;
-    CHECK(!missing.Create(nullptr) && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
-    CHECK(missing.DoModal(nullptr) == -1 && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
+    for (WORD resource : {WORD(603), WORD(608)}) {
+        MissingControlDialog missing;
+        missing.resource = resource;
+        CHECK(!missing.Create(nullptr) && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
+        CHECK(missing.DoModal(nullptr) == -1 && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
+    }
+    FreeDialogState named;
+    const HWND window = ATL::AtlAxCreateDialog(ATL::_AtlBaseModule.GetResourceInstance(), L"OPENATL_CLSID", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&named));
+    CHECK(window && named.initialized == 1);
+    ATL::CWindow container(window); ATL::CComPtr<IWebBrowser2> control;
+    CHECK(container.GetDlgControl(701, IID_IWebBrowser2, reinterpret_cast<void**>(&control.p)) == S_OK);
+    control.Release(); CHECK(::DestroyWindow(window) && module.GetLockCount() == 0);
     return true;
 }
 void BrowserPhase(int cycle, const char* phase) noexcept {
@@ -429,7 +525,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!plainDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!dialogTemplates() || !plainDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

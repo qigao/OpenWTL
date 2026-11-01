@@ -65,8 +65,11 @@ CAxDialogImpl and AtlAxCreateDialog/AtlAxDialogBox create native resource dialog
 whose controls name the existing AxWin host classes. The class automatically
 subscribes before WM_INITDIALOG and unadvises before destruction, using the same
 dialog thunk/dispatcher. Explicit close failures preserve the window for retry.
-DLGINIT persistence/license records and CLSID-class splitting remain unsupported;
-unsupported initialization fails rather than being skipped. See
+Standard/extended resources may also name a literal CLSID as a control class:
+validated empty placeholders are converted into the existing AxWin host with
+the CLSID as its creation text. Ordinary controls and original resource bytes
+are preserved. DLGINIT persistence/license records and nonempty placeholder
+initialization remain unsupported; they fail rather than being skipped. See
 [control-dialog scope](ATL_COMPATIBILITY.md#control-hosting-dialogs).
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
