@@ -935,8 +935,9 @@ bool dialogInitStreams() {
     ATL::CComPtr<IStream> empty;
     CHECK(makeStream(reinterpret_cast<const BYTE*>(&noLicense), sizeof(noLicense), empty));
     BYTE unused = 0; ULONG emptyRead = 0;
+    // Native HGlobal reports EOF as S_OK with zero bytes read.
     CHECK(Split::ParseInitData(empty, &license.m_str) == S_OK && !license.m_str && empty &&
-        empty->Read(&unused, 1, &emptyRead) == S_FALSE && !emptyRead);
+        empty->Read(&unused, 1, &emptyRead) == S_OK && !emptyRead);
     // The key starts at the current stream position, with opaque trailing data.
     record.insert(record.begin(), 5, 0xAB);
     stream.Release(); CHECK(makeStream(record.data(), record.size(), stream));

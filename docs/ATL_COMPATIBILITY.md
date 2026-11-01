@@ -1021,6 +1021,9 @@ encoded length/budget. Original resource-envelope validation remains separate
 from HGlobal allocation capacity/padding. Existing cases reproduce WTL's actual
 GlobalAlloc/Lock/copy/CreateStream ownership, exercise stream/INITNEW distinctions,
 and reuse the COM-client fault fixture for both key transfers and Seek/Stat.
+The native HGlobal stream reports EOF as S_OK with zero bytes read, as documented
+in the [memory-stream comparison](https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-shcreatememstream).
+Required key bytes are checked by transfer count even when Read returns S_OK.
 
 DLGINIT stream records (message 0x0376) are bounded by the resource size. Each
 record has a WORD control ID, WORD message and DWORD payload length, followed
