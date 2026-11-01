@@ -210,6 +210,7 @@ public:
     END_SINK_MAP()
     HRESULT GetDlgControl(int, REFIID, void**) { return E_FAIL; }
 };
+class DerivedMap : public Prefix, public MapSink {};
 class ConflictingMap : public ATL::IDispEventSimpleImpl<53, ConflictingMap, &IID_NULL> {
 public:
     inline static ATL::_ATL_FUNC_INFO signature = {CC_STDCALL, VT_EMPTY, 0, {}};
@@ -434,6 +435,12 @@ bool MapBinding() {
     EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, true) == CONNECT_E_ADVISELIMIT);
     EVENT_CHECK(ATL::AtlAdviseSinkMap(&sink, false) == S_OK);
     EVENT_CHECK(sink.retained.vt == VT_BSTR && std::wcscmp(sink.retained.bstrVal, L"retained event") == 0);
+    DerivedMap inherited;
+    EVENT_CHECK(static_cast<void*>(static_cast<MapSink*>(&inherited)) != static_cast<void*>(&inherited));
+    inherited.first = first->GetUnknown(); inherited.second = second->GetUnknown();
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&inherited, true) == S_OK && Scalar(first.p) && Scalar(second.p));
+    EVENT_CHECK(inherited.correct && inherited.left == 1 && inherited.right == 1);
+    EVENT_CHECK(ATL::AtlAdviseSinkMap(&inherited, false) == S_OK);
     return true;
 }
 bool MetadataAndCalls() {

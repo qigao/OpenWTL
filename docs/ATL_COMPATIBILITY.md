@@ -526,6 +526,8 @@ E_NOINTERFACE, and supplied output storage is cleared before lookup.
 One nID selects one sink base. Compiler-checked base conversions select the
 most-derived IDispEventImpl or IDispEventSimpleImpl implementation, preserving
 per-connection TypeLib ownership and manually described invocation respectively.
+Inherited maps adjust the declaring owner before invoking binding callbacks,
+including when another polymorphic base precedes that owner.
 Multiple handlers for the same control share one subscription. Wildcard IID
 entries use default-source discovery; explicit IID entries select that source.
 Conflicting explicit IIDs for one control fail E_INVALIDARG before lookup.

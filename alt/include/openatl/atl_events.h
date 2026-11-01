@@ -648,6 +648,7 @@ template<UINT id, class T> struct SinkMapBinding {
 
 template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
     if (!object) return E_POINTER;
+    auto owner = static_cast<typename T::_OpenATLSinkMapOwner*>(object);
     bool& changing = object->_OpenATLSinkMapChanging;
     if (changing) return E_UNEXPECTED;
     struct Change { bool& flag; explicit Change(bool& value) : flag(value) { flag = true; } ~Change() { flag = false; } } guard(changing);
@@ -671,7 +672,7 @@ template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
         if (!advise) {
             HRESULT failure = S_OK;
             for (auto& group : groups) {
-                const HRESULT hr = group.entry->connection(object, nullptr, group.iid, false);
+                const HRESULT hr = group.entry->connection(owner, nullptr, group.iid, false);
                 if (hr != S_OK && hr != S_FALSE && failure == S_OK) failure = FAILED(hr) ? hr : E_UNEXPECTED;
             }
             return failure;
@@ -679,7 +680,7 @@ template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
         // Acquire every source before changing any connection. One nID selects
         // one compiler-adjusted sink base; repeated handlers share that binding.
         for (auto& group : groups)
-            if (group.entry->connected(object)) return CONNECT_E_ADVISELIMIT;
+            if (group.entry->connected(owner)) return CONNECT_E_ADVISELIMIT;
         for (auto& group : groups) {
             const HRESULT hr = object->GetDlgControl(static_cast<int>(group.entry->control),
                 IID_IUnknown, reinterpret_cast<void**>(&group.source.p));
@@ -688,12 +689,12 @@ template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
         }
         for (size_t n = 0; n < groups.size(); ++n) {
             auto& group = groups[n];
-            HRESULT hr = group.entry->connection(object, group.source.p, group.iid, true);
+            HRESULT hr = group.entry->connection(owner, group.source.p, group.iid, true);
             if (hr == S_OK) continue;
             HRESULT failure = FAILED(hr) ? hr : E_UNEXPECTED;
             while (n) {
                 auto& previous = groups[--n];
-                const HRESULT undone = previous.entry->connection(object, nullptr, previous.iid, false);
+                const HRESULT undone = previous.entry->connection(owner, nullptr, previous.iid, false);
                 if (undone != S_OK && undone != S_FALSE) failure = FAILED(undone) ? undone : E_UNEXPECTED;
             }
             return failure;
@@ -705,6 +706,7 @@ template<class T> HRESULT AtlAdviseSinkMap(T* object, bool advise) noexcept {
 
 #define BEGIN_SINK_MAP(x) \
 public: \
+    using _OpenATLSinkMapOwner = x; \
     bool _OpenATLSinkMapChanging = false; \
     static const ATL::detail::EventEntry* _GetSinkMap() { \
         using _SinkClass = x; \
