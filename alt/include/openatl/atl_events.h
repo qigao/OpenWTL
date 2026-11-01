@@ -157,6 +157,9 @@ template<class Owner, auto Method> HRESULT InvokeMappedEvent(void* object, DISPP
 }
 } // namespace detail
 
+inline HRESULT WINAPI AtlGetObjectSourceInterface(IUnknown* object, GUID* library,
+    IID* source, unsigned short* major, unsigned short* minor) noexcept;
+
 // As in ATL, the containing C++ object owns this sink's lifetime. Unadvise
 // before destroying it; AddRef/Release do not delete a window or stack owner.
 template<UINT nID, class T, const IID* pdiid>
@@ -243,10 +246,9 @@ public:
         Change guard(changing_);
         IID selected = iid ? *iid : IID_NULL;
         if (selected == IID_NULL) {
-            CComPtr<IProvideClassInfo2> info;
-            HRESULT hr = source->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&info));
-            if (FAILED(hr)) return hr;
-            hr = info->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &selected);
+            GUID library = GUID_NULL;
+            unsigned short major = 0, minor = 0;
+            const HRESULT hr = AtlGetObjectSourceInterface(source, &library, &selected, &major, &minor);
             if (FAILED(hr)) return hr;
         }
         return ConnectPoint(source, selected);
@@ -266,10 +268,15 @@ public:
         hr = source->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&requested));
         if (FAILED(hr)) return hr;
         if (actual.p != requested.p) return CONNECT_E_NOCONNECTION;
-        return DisconnectPoint();
+        hr = DisconnectPoint();
+        if (hr == S_OK) {
+            if constexpr (pdiid != nullptr) iid_ = *pdiid;
+            else iid_ = IID_NULL;
+        }
+        return hr;
     }
-    HRESULT Advise(IUnknown* source) noexcept { return DispEventAdvise(source); }
-    HRESULT Unadvise(IUnknown* source) noexcept { return DispEventUnadvise(source); }
+    HRESULT Advise(IUnknown* source) noexcept { return DispEventAdvise(source, &IID_NULL); }
+    HRESULT Unadvise(IUnknown* source) noexcept { return DispEventUnadvise(source, &IID_NULL); }
     DWORD m_dwEventCookie = 0xFEFEFEFE;
 protected:
     struct Change { bool& flag; explicit Change(bool& value) : flag(value) { flag = true; } ~Change() { flag = false; } };

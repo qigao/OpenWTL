@@ -151,6 +151,14 @@ public:
         SINK_ENTRY(32, 101, &HandlerBase::Changed)
     END_SINK_MAP()
 };
+template<const IID* Outgoing = &IID_NULL>
+class SimpleSink : public ATL::IDispEventSimpleImpl<33, SimpleSink<Outgoing>, Outgoing>, public HandlerBase {
+public:
+    inline static ATL::_ATL_FUNC_INFO signature = {CC_STDCALL, VT_EMPTY, 3, {VT_I4, VT_BOOL, VT_BSTR}};
+    BEGIN_SINK_MAP(SimpleSink)
+        SINK_ENTRY_INFO(33, IID_NULL, 101, Changed, &signature)
+    END_SINK_MAP()
+};
 class PairSink : public ATL::IDispEventImpl<41, PairSink>, public ATL::IDispEventImpl<42, PairSink> {
 public:
     using LeftBase = ATL::IDispEventImpl<41, PairSink>;
@@ -252,6 +260,81 @@ bool DiscoveryFallbacks() {
     // An explicitly supplied outgoing IID needs only the incoming library.
     EVENT_CHECK(sink.DispEventAdvise(dispatchOnly->GetUnknown(), &DIID__IOpenATLDispatchEvents) == S_OK && Scalar(dispatchOnly.p) && sink.correct);
     EVENT_CHECK(sink.Unadvise(dispatchOnly->GetUnknown()) == S_OK);
+    return true;
+}
+bool SimpleDiscovery() {
+    ATL::CComPtr<ATL::CComObject<Source>> modern, other;
+    ATL::CComPtr<ATL::CComObject<LegacySource>> legacy;
+    ATL::CComPtr<ATL::CComObject<PersistSource>> persisted;
+    ATL::CComPtr<ATL::CComObject<DispatchOnlySource>> dispatchOnly;
+    EVENT_CHECK(Make(modern) && Make(other) && Make(legacy) && Make(persisted) && Make(dispatchOnly));
+    SimpleSink<> sink;
+    EVENT_CHECK(sink.Advise(nullptr) == E_POINTER && sink.Unadvise(nullptr) == E_POINTER);
+    EVENT_CHECK(sink.m_dwEventCookie == 0xFEFEFEFE);
+    ATL::CComPtr<IUnknown> outgoing;
+    auto identity = [&](HRESULT expected) {
+        outgoing.Release();
+        const HRESULT hr = sink.QueryInterface(DIID__IOpenATLDispatchEvents, reinterpret_cast<void**>(&outgoing.p));
+        const bool correct = hr == expected && (expected == S_OK ? outgoing.p != nullptr : outgoing.p == nullptr);
+        outgoing.Release(); return correct;
+    };
+    EVENT_CHECK(identity(E_NOINTERFACE));
+    modern->metadata = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Advise(modern->GetUnknown()) == E_ACCESSDENIED && identity(E_NOINTERFACE));
+    modern->metadata = S_OK; modern->connect = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Advise(modern->GetUnknown()) == E_ACCESSDENIED && identity(E_NOINTERFACE) && sink.m_dwEventCookie == 0xFEFEFEFE);
+    modern->connect = S_OK; modern->eager = true;
+    HRESULT reentrant = S_OK;
+    sink.callback = [&] { reentrant = sink.Unadvise(modern->GetUnknown()); };
+    EVENT_CHECK(sink.Advise(modern->GetUnknown()) == S_OK && sink.changed == 1 && sink.correct && reentrant == E_UNEXPECTED && identity(S_OK));
+    sink.callback = {}; modern->eager = false;
+    EVENT_CHECK(sink.Advise(other->GetUnknown()) == CONNECT_E_ADVISELIMIT);
+    const DWORD cookie = sink.m_dwEventCookie;
+    EVENT_CHECK(sink.Unadvise(other->GetUnknown()) == CONNECT_E_NOCONNECTION && sink.m_dwEventCookie == cookie);
+    modern->disconnect = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Unadvise(modern->GetUnknown()) == E_ACCESSDENIED && sink.m_dwEventCookie == cookie && identity(S_OK) && Scalar(modern.p));
+    modern->disconnect = S_OK;
+    EVENT_CHECK(sink.Unadvise(modern->GetUnknown()) == S_OK && identity(E_NOINTERFACE) && sink.m_dwEventCookie == 0xFEFEFEFE);
+    legacy->coclass = CLSID_NoDefaultEventFixtureSource;
+    EVENT_CHECK(sink.Advise(legacy->GetUnknown()) == CONNECT_E_NOCONNECTION && identity(E_NOINTERFACE));
+    legacy->coclass = DIID__IOpenATLDispatchEvents;
+    EVENT_CHECK(sink.Advise(legacy->GetUnknown()) == E_UNEXPECTED && identity(E_NOINTERFACE));
+    legacy->coclass = CLSID_EventFixtureSource;
+    EVENT_CHECK(sink.DispEventAdvise(legacy->GetUnknown(), nullptr) == S_OK && Scalar(legacy.p) && sink.correct);
+    UINT count = 99; ATL::CComPtr<ITypeInfo> info;
+    EVENT_CHECK(sink.GetTypeInfoCount(&count) == E_NOTIMPL && count == 0);
+    EVENT_CHECK(sink.GetTypeInfo(0, 0, &info.p) == E_NOTIMPL && !info.p);
+    EVENT_CHECK(sink.Unadvise(legacy->GetUnknown()) == S_OK && identity(E_NOINTERFACE));
+    persisted->classId = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Advise(persisted->GetUnknown()) == E_ACCESSDENIED && identity(E_NOINTERFACE));
+    persisted->classId = S_OK; persisted->dispatchMetadata = E_ACCESSDENIED;
+    EVENT_CHECK(sink.Advise(persisted->GetUnknown()) == E_ACCESSDENIED && identity(E_NOINTERFACE));
+    persisted->dispatchMetadata = S_OK;
+    EVENT_CHECK(sink.Advise(persisted->GetUnknown()) == S_OK && Scalar(persisted.p) && sink.correct);
+    EVENT_CHECK(sink.Unadvise(persisted->GetUnknown()) == S_OK && identity(E_NOINTERFACE));
+    EVENT_CHECK(sink.Advise(dispatchOnly->GetUnknown()) == E_NOINTERFACE && identity(E_NOINTERFACE));
+    // Explicit IID selection needs no source metadata, including when an
+    // advertised provider fails. Advise must still discover the default.
+    SimpleSink<&DIID__IOpenATLDispatchEvents> fixed;
+    modern->metadata = E_ACCESSDENIED;
+    EVENT_CHECK(fixed.Advise(modern->GetUnknown()) == E_ACCESSDENIED);
+    EVENT_CHECK(fixed.DispEventAdvise(modern->GetUnknown()) == S_OK && Scalar(modern.p) && fixed.correct);
+    EVENT_CHECK(fixed.DispEventUnadvise(modern->GetUnknown()) == S_OK);
+    EVENT_CHECK(fixed.DispEventAdvise(dispatchOnly->GetUnknown()) == S_OK && Scalar(dispatchOnly.p) && fixed.correct);
+    EVENT_CHECK(fixed.DispEventUnadvise(dispatchOnly->GetUnknown()) == S_OK);
+    SimpleSink<&DIID__IOpenATLSourceDispatch> different;
+    EVENT_CHECK(different.DispEventAdvise(legacy->GetUnknown()) == CONNECT_E_NOCONNECTION);
+    EVENT_CHECK(different.Advise(legacy->GetUnknown()) == S_OK && Scalar(legacy.p) && different.correct);
+    EVENT_CHECK(different.Unadvise(legacy->GetUnknown()) == S_OK);
+    EVENT_CHECK(different.QueryInterface(DIID__IOpenATLSourceDispatch, reinterpret_cast<void**>(&outgoing.p)) == S_OK);
+    outgoing.Release();
+    EVENT_CHECK(different.QueryInterface(DIID__IOpenATLDispatchEvents, reinterpret_cast<void**>(&outgoing.p)) == E_NOINTERFACE && !outgoing.p);
+    { SimpleSink<> automatic; EVENT_CHECK(automatic.Advise(persisted->GetUnknown()) == S_OK && Scalar(persisted.p)); }
+    ATL::CComPtr<IConnectionPoint> point;
+    ATL::CComPtr<IEnumConnections> connections;
+    CONNECTDATA data{};
+    EVENT_CHECK(persisted->FindConnectionPoint(DIID__IOpenATLDispatchEvents, &point.p) == S_OK);
+    EVENT_CHECK(point->EnumConnections(&connections.p) == S_OK && connections->Next(1, &data, nullptr) == S_FALSE);
     return true;
 }
 bool MetadataAndCalls() {
@@ -380,7 +463,7 @@ bool RegisteredMetadata() {
 bool RunAtlTypeLibEventTests() {
     ULONG_PTR token = 0;
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
-    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && DiscoveryFallbacks() && RegisteredMetadata());
+    EVENT_CHECK(MetadataAndCalls() && BindingAndIdentities() && DiscoveryFallbacks() && SimpleDiscovery() && RegisteredMetadata());
     EVENT_CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     return true;
 }
@@ -390,9 +473,11 @@ bool RunDllTypeLibEventTests(IOpenATLValue* object) {
     EVENT_CHECK(object->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&absent.p)) == E_NOINTERFACE && !absent.p);
     ExplicitSink<FileHolder> explicitSink;
     DynamicSink inferred;
-    EVENT_CHECK(inferred.Advise(object) == S_OK && explicitSink.Advise(object) == S_OK);
+    SimpleSink<> simple;
+    EVENT_CHECK(inferred.Advise(object) == S_OK && explicitSink.Advise(object) == S_OK && simple.Advise(object) == S_OK);
     LONG value = 0;
     EVENT_CHECK(object->GetValue(&value) == S_OK && value == 42 && inferred.correct && inferred.changed == 1 && explicitSink.correct && explicitSink.changed == 1 && explicitSink.bundles == 1);
+    EVENT_CHECK(simple.correct && simple.changed == 1 && simple.Unadvise(object) == S_OK);
     ATL::CComPtr<IOpenATLSecond> second;
     EVENT_CHECK(object->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK);
     // The inferred sink handles only Changed, so disconnect it before other events.
@@ -410,9 +495,11 @@ bool RunDllPersistEventTests(IOpenATLValue* object) {
     ATL::CComPtr<IProvideClassInfo> absent;
     EVENT_CHECK(object->QueryInterface(IID_IProvideClassInfo, reinterpret_cast<void**>(&absent.p)) == E_NOINTERFACE && !absent.p);
     DynamicSink sink; sink.expected = 84;
-    EVENT_CHECK(sink.Advise(object) == S_OK);
+    SimpleSink<> simple; simple.expected = 84;
+    EVENT_CHECK(sink.Advise(object) == S_OK && simple.Advise(object) == S_OK);
     LONG value = 0;
     EVENT_CHECK(object->GetValue(&value) == S_OK && value == 84 && sink.correct && sink.changed == 1);
+    EVENT_CHECK(simple.correct && simple.changed == 1 && simple.Unadvise(object) == S_OK);
     EVENT_CHECK(sink.Unadvise(object) == S_OK && object->GetValue(&value) == S_OK && value == 84 && sink.changed == 1);
     return true;
 }
