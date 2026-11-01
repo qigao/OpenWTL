@@ -603,7 +603,14 @@ public:
         return window_ && ::IsDialogMessageW(window_, message) ? S_OK : S_FALSE;
     }
 private:
-    ~PropertyPage() { if (::IsWindow(window_)) ::DestroyWindow(window_); ++state_.destroyed; }
+    ~PropertyPage() {
+        // Native containers can clear these explicitly or release the page
+        // itself. Count the actual owned-reference releases in either path.
+        if (object_) { object_.Release(); ++state_.unbound; }
+        if (site_) { site_.Release(); ++state_.clearedSites; }
+        if (::IsWindow(window_)) ::DestroyWindow(window_);
+        ++state_.destroyed;
+    }
     ULONG refs_ = 1;
     PropertyState& state_;
     ATL::CComPtr<IPropertyPageSite> site_;
@@ -672,9 +679,13 @@ bool propertyFrames() {
         REQUIRE(result == expected && properties.good);
         REQUIRE(properties.queried == (scenario == 0 || scenario == 4 ? 0 : 1));
         if (scenario >= 7) {
-            REQUIRE(properties.created > 0 && properties.created == properties.destroyed && properties.activated > 0 &&
+            const bool complete = properties.created > 0 && properties.created == properties.destroyed && properties.activated > 0 &&
                 properties.activated == properties.deactivated && properties.bound > 0 && properties.bound == properties.unbound &&
-                properties.sites == properties.clearedSites && properties.shown == 1 && properties.nested == 2 && properties.captions == 1);
+                properties.sites == properties.clearedSites && properties.shown == 1 && properties.nested == 2 && properties.captions == 1;
+            if (!complete) std::fprintf(stderr, "PROPERTY_FRAME_COUNTS scenario=%d created=%d destroyed=%d active=%d deactive=%d bound=%d unbound=%d sites=%d clear=%d shown=%d nested=%d captions=%d applied=%d value=%ld\n",
+                scenario, properties.created, properties.destroyed, properties.activated, properties.deactivated, properties.bound,
+                properties.unbound, properties.sites, properties.clearedSites, properties.shown, properties.nested, properties.captions, properties.applied, properties.value);
+            REQUIRE(complete);
             REQUIRE(properties.applied == (properties.cancel ? 0 : 1) && properties.value == (properties.cancel ? 9 : 314));
             REQUIRE(::IsWindowEnabled(window) == enabled);
             // A second native modal frame proves that the operation guard was released.
