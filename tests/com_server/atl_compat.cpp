@@ -9,6 +9,7 @@
 #include <vector>
 
 bool RunAtlSafeArrayTests();
+bool RunAtlConnectionPointTests();
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ATL_COMPAT_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
@@ -1155,6 +1156,7 @@ bool RunAtlCompatibilityTests() {
     CHECK(Aggregation());
     CHECK(PolyObjects());
     CHECK(RunAtlSafeArrayTests());
+    CHECK(RunAtlConnectionPointTests());
     CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());
