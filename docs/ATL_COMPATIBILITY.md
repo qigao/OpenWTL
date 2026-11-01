@@ -504,7 +504,7 @@ The existing WebBrowser case
 uses IDispEventImpl for real DocumentComplete events. No target/test mode/export/
 workflow is added; all 36 pinned Microsoft blobs remain unchanged.
 
-Wider Automation signature/locale behavior, AtlAdviseSinkMap/composite-control integration,
+Wider Automation signature/locale behavior, full composite-control integration,
 exact member layouts and whole original event proxy/project admission remain
 open. This bounded sink implementation is not complete ActiveX control support.
 
@@ -514,3 +514,51 @@ References: [IDispEventImpl](https://learn.microsoft.com/en-us/cpp/atl/reference
 [IProvideClassInfo](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nn-ocidl-iprovideclassinfo),
 [IPersist](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nn-objidl-ipersist),
 [sink-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-macros).
+
+## Sink-map subscriptions
+
+AtlAdviseSinkMap(T*, bool) binds the existing typed sink map through the owner's
+GetDlgControl(int, REFIID, void**) method. With atlhost.h included,
+CWindow::GetDlgControl retrieves the actual hosted child control through
+AtlAxGetControl; absent children return E_FAIL, unsupported interfaces propagate
+E_NOINTERFACE, and supplied output storage is cleared before lookup.
+
+One nID selects one sink base. Compiler-checked base conversions select the
+most-derived IDispEventImpl or IDispEventSimpleImpl implementation, preserving
+per-connection TypeLib ownership and manually described invocation respectively.
+Inherited maps adjust the declaring owner before invoking binding callbacks,
+including when another polymorphic base precedes that owner.
+Multiple handlers for the same control share one subscription. Wildcard IID
+entries use default-source discovery; explicit IID entries select that source.
+Conflicting explicit IIDs for one control fail E_INVALIDARG before lookup.
+Multiple sink bases with the same nID are outside this bounded implementation.
+The internal map representation and member layouts are not Microsoft ATL ABI.
+
+The helper preflights all sources and rejects already connected bases before
+starting subscriptions. A failure rolls back only connections established by
+that call, in reverse order. If rollback itself fails, a rollback error is
+returned and the retained connection can be retried through Unadvise. Unadvise
+uses each sink's retained connection point, without querying changed or missing
+child controls; it attempts all groups, returns the first failure and preserves
+failed subscriptions for retry. Already disconnected groups are harmless.
+Unexpected success codes from a connected source's Unadvise fail E_UNEXPECTED;
+they are not confused with an already disconnected sink.
+Recursive map operations on one owner fail E_UNEXPECTED. No global binding
+registry, implicit COM initialization or automatic owner deletion is added.
+
+Existing native core cases cover mixed sink types, repeated entries, preflight,
+subscription/rollback failures, reentrant callbacks, retained metadata, partial
+Unadvise/retry and rebinding. Existing Value/AuxValue DLL aggregation/activation
+cases deliver actual events to both map bases. The existing real WebBrowser
+case now uses a hosted child control, CWindow::GetDlgControl and
+AtlAdviseSinkMap for DocumentComplete, preserving its original runtime budget
+and stdout contract. No target, test mode, export, workflow or original blob is
+added or replaced; all 36 pinned original files remain byte-checked.
+
+CAxDialogImpl automatic resource/control creation, full composite controls,
+same-nID multiple-IID bases, exact internal layouts and whole original event
+projects remain open. Applications must unadvise successfully before destroying
+the C++ sink owner and must own COM/apartment and UI-thread lifetimes.
+
+References: [AtlAdviseSinkMap](https://learn.microsoft.com/en-us/cpp/atl/reference/connection-point-global-functions),
+[CWindow::GetDlgControl](https://learn.microsoft.com/en-us/cpp/atl/reference/cwindow-class).

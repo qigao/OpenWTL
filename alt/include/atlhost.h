@@ -487,6 +487,15 @@ inline HRESULT WINAPI AtlAxGetControl(HWND window, IUnknown** output) noexcept {
     HRESULT hr = detail::GetAxHost(window, &host, false);
     return FAILED(hr) ? hr : host->QueryControl(IID_IUnknown, reinterpret_cast<void**>(output));
 }
+inline HRESULT CWindow::GetDlgControl(int id, REFIID iid, void** output) noexcept {
+    if (!output) return E_POINTER; *output = nullptr;
+    if (!::IsWindow(m_hWnd)) return E_FAIL;
+    const HWND child = ::GetDlgItem(m_hWnd, id);
+    if (!child) return E_FAIL;
+    CComPtr<IUnknown> control;
+    const HRESULT hr = AtlAxGetControl(child, &control.p);
+    return FAILED(hr) ? hr : control->QueryInterface(iid, output);
+}
 inline HRESULT WINAPI AtlAxAttachControl(IUnknown* control, HWND window, IUnknown** output) noexcept {
     if (output) *output = nullptr;
     CComPtr<detail::AxHost> host;

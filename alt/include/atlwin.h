@@ -911,6 +911,8 @@ public:
     }
 
     // Dialog item
+    HRESULT GetDlgControl(int nID, REFIID iid, void** output) noexcept;
+
     CWindow GetDlgItem(int nID) const noexcept
     {
         ATLASSERT(::IsWindow(m_hWnd));
