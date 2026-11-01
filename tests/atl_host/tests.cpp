@@ -298,6 +298,238 @@ bool propertyBrowsing() {
     CHECK(state.destroyed == 1);
     return true;
 }
+struct PersistenceState {
+    LONG number = 314;
+    ATL::CComBSTR text;
+    ATL::CComPtr<IUnknown> reference;
+    BOOL flag = TRUE;
+    BOOL dirtyAtDestruction = TRUE;
+    int destroyed = 0, getFailure = 0, putFailure = 0, puts[2]{};
+    bool valid = true;
+};
+template<class T, int Which> class PersistenceDispatch : public IDispatch {
+public:
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID member, REFIID iid, LCID locale, WORD flags,
+        DISPPARAMS* args, VARIANT* result, EXCEPINFO*, UINT*) override {
+        auto object = static_cast<T*>(this); auto& state = *object->state;
+        state.valid = state.valid && iid == IID_NULL && locale == LOCALE_USER_DEFAULT && args &&
+            (Which == (member == 12 ? 1 : 0));
+        if (!args) return E_POINTER;
+        if (flags == DISPATCH_PROPERTYGET) {
+            state.valid = state.valid && !args->cArgs && !args->cNamedArgs && !args->rgvarg && !args->rgdispidNamedArgs;
+            if (!result) return E_POINTER;
+            if (state.getFailure) {
+                result->vt = VT_UNKNOWN; result->punkVal = state.reference; result->punkVal->AddRef();
+                if (state.getFailure == 2) throw ATL::CAtlException(E_ABORT);
+                if (state.getFailure == 3) throw std::bad_alloc();
+                return E_ACCESSDENIED;
+            }
+            if (member == 11) { result->vt = VT_I4 | VT_BYREF; result->plVal = &state.number; }
+            else if (member == 12) { result->vt = VT_BSTR; result->bstrVal = state.text.Copy(); if (!result->bstrVal) return E_OUTOFMEMORY; }
+            else if (member == 13) { result->vt = VT_BOOL; result->boolVal = state.flag ? VARIANT_TRUE : VARIANT_FALSE; }
+            else if (member == 14) { result->vt = VT_UNKNOWN; result->punkVal = state.reference; if (result->punkVal) result->punkVal->AddRef(); }
+            else return DISP_E_MEMBERNOTFOUND;
+            return S_OK;
+        }
+        state.valid = state.valid && args->cArgs == 1 && args->cNamedArgs == 1 && args->rgvarg &&
+            args->rgdispidNamedArgs && args->rgdispidNamedArgs[0] == DISPID_PROPERTYPUT &&
+            flags == (member == 14 ? DISPATCH_PROPERTYPUTREF : DISPATCH_PROPERTYPUT) && !result;
+        if (state.putFailure) return E_ACCESSDENIED;
+        if (!args->rgvarg) return E_POINTER;
+        const auto& value = args->rgvarg[0]; ++state.puts[Which];
+        if (member == 11 && value.vt == VT_I4) state.number = value.lVal;
+        else if (member == 12 && value.vt == VT_BSTR) {
+            BSTR copy = ::SysAllocStringLen(value.bstrVal, ::SysStringLen(value.bstrVal));
+            if (!copy) return E_OUTOFMEMORY; state.text.Attach(copy);
+        } else if (member == 13 && value.vt == VT_BOOL) state.flag = value.boolVal != VARIANT_FALSE;
+        else if (member == 14 && value.vt == VT_UNKNOWN) state.reference = value.punkVal;
+        else return DISP_E_TYPEMISMATCH;
+        object->m_bRequiresSave = TRUE;
+        return S_OK;
+    }
+};
+class PersistentObject : public MapPrefix, public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                         public PersistenceDispatch<PersistentObject, 0>, public PersistenceDispatch<PersistentObject, 1>,
+                         public ATL::IPersistPropertyBagImpl<PersistentObject> {
+public:
+    using Primary = PersistenceDispatch<PersistentObject, 0>;
+    using Secondary = PersistenceDispatch<PersistentObject, 1>;
+    using _PropMapClass = PersistentObject;
+    inline static int mapFailure = 0;
+    PersistenceState* state = nullptr;
+    ULONG guard1 = 0x12345678;
+    SIZEL extent{123,456};
+    ULONG guard2 = 0x98765432;
+    BOOL m_bRequiresSave = TRUE;
+    ~PersistentObject() { if (state) { ++state->destroyed; state->dirtyAtDestruction = m_bRequiresSave; } }
+    static REFCLSID GetObjectCLSID() noexcept { return MapPageA; }
+    static ATL::_ATL_PROP_ENTRY* GetPropertyMap() {
+        static ATL::_ATL_PROP_ENTRY entries[] = {
+            PROP_PAGE(MapPageA)
+            PROP_DATA_ENTRY("_cx", extent.cx, VT_I4)
+            PROP_DATA_ENTRY("_cy", extent.cy, VT_I4)
+            PROP_ENTRY_TYPE("Number", 11, CLSID_NULL, VT_I4)
+            PROP_ENTRY_TYPE_EX("Text", 12, MapPageA, BrowseAlternateIID, VT_BSTR)
+            PROP_ENTRY("Flag", 13, CLSID_NULL)
+            PROP_ENTRY_TYPE("Reference", 14, CLSID_NULL, VT_UNKNOWN)
+            {}
+        };
+        static ATL::_ATL_PROP_ENTRY empty[] = { PROP_PAGE(MapPageA) {} };
+        static ATL::_ATL_PROP_ENTRY bad[] = { {L"Bad",0,nullptr,nullptr,0,4,VT_I4}, {} };
+        if (mapFailure == 1) return nullptr;
+        if (mapFailure == 2) throw std::bad_alloc();
+        if (mapFailure == 3) { bad[0] = {L"Bad",0,nullptr,nullptr,MAXDWORD,4,VT_I4}; return bad; }
+        if (mapFailure == 4) { bad[0] = {L"Bad",0,nullptr,nullptr,0,4,VT_BSTR}; return bad; }
+        if (mapFailure == 5) { bad[0] = {L"Bad",0,nullptr,nullptr,0,1,VT_I4}; return bad; }
+        if (mapFailure == 7) { bad[0] = {L"Number",11,&MapPageA,&BrowseMissingIID,0,0,VT_I4}; return bad; }
+        return mapFailure == 6 ? empty : entries;
+    }
+    BEGIN_COM_MAP(PersistentObject)
+        COM_INTERFACE_ENTRY(IPersistPropertyBag)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY2(IDispatch, Primary)
+        COM_INTERFACE_ENTRY2_IID(BrowseAlternateIID, IDispatch, Secondary)
+    END_COM_MAP()
+};
+class CallerPropertyBag : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                          public IPropertyBag, public IErrorLog {
+public:
+    LPCOLESTR names[6] = {L"_cx",L"_cy",L"Number",L"Text",L"Flag",L"Reference"};
+    ATL::CComVariant values[6];
+    int reads = 0, writes = 0, errors = 0, failRead = 0, failWrite = 0, throwRead = 0;
+    DWORD missing = 0;
+    HRESULT lastError = S_OK;
+    LPCOLESTR lastName = nullptr;
+    bool valid = true, reenter = false, positiveRead = false, positiveWrite = false;
+    IUnknown* probe = nullptr;
+    IPersistPropertyBag* owner = nullptr;
+    IPersistPropertyBag* dropOwner = nullptr;
+    BEGIN_COM_MAP(CallerPropertyBag)
+        COM_INTERFACE_ENTRY(IPropertyBag)
+        COM_INTERFACE_ENTRY(IErrorLog)
+    END_COM_MAP()
+    int Find(LPCOLESTR name) const { for (int i = 0; i < 6; ++i) if (!::wcscmp(name, names[i])) return i; return -1; }
+    void Reenter() {
+        if (reenter) { CLSID id{}; valid = owner && owner->GetClassID(&id) == S_OK && id == MapPageA && valid; }
+        if (dropOwner) { auto release = dropOwner; dropOwner = nullptr; release->Release(); }
+    }
+    HRESULT STDMETHODCALLTYPE Read(LPCOLESTR name, VARIANT* value, IErrorLog* log) override {
+        ++reads; Reenter(); const int index = Find(name);
+        if (index < 0 || (missing & (1UL << index))) return E_INVALIDARG;
+        const VARTYPE types[] = {VT_I4,VT_I4,VT_I4,VT_BSTR,VT_EMPTY,VT_UNKNOWN};
+        valid = value && value->vt == types[index] && (!log || log == static_cast<IErrorLog*>(this)) && valid;
+        if (!value) return E_POINTER;
+        ::VariantClear(value);
+        if (throwRead) {
+            value->vt = VT_UNKNOWN; value->punkVal = probe; probe->AddRef();
+            if (throwRead == 1) throw ATL::CAtlException(E_ABORT);
+            if (throwRead == 2) throw std::bad_alloc();
+            throw std::runtime_error("property bag read failure");
+        }
+        if (failRead == reads) {
+            EXCEPINFO error{}; error.scode = STG_E_READFAULT; if (log) log->AddError(name, &error);
+            return STG_E_READFAULT;
+        }
+        const HRESULT hr = ::VariantCopy(value, &values[index]); // Deliberately leaves coercion to the consumer.
+        return SUCCEEDED(hr) && positiveRead ? S_FALSE : hr;
+    }
+    HRESULT STDMETHODCALLTYPE Write(LPCOLESTR name, VARIANT* value) override {
+        ++writes; Reenter(); const int index = Find(name);
+        if (index < 0) return E_INVALIDARG;
+        if (failWrite == writes) return STG_E_WRITEFAULT;
+        const HRESULT hr = values[index].Copy(value);
+        return SUCCEEDED(hr) && positiveWrite ? S_FALSE : hr;
+    }
+    HRESULT STDMETHODCALLTYPE AddError(LPCOLESTR name, EXCEPINFO* info) override {
+        ++errors; lastName = name; lastError = info->scode; return E_ACCESSDENIED;
+    }
+};
+bool persistentProperties() {
+    PersistenceState sourceState, targetState;
+    const WCHAR text[] = {L'A',0,L'B'};
+    sourceState.text.Attach(::SysAllocStringLen(text, 3)); targetState.text = L"default";
+    ATL::CComPtr<ISpecifyPropertyPages> probe; CHECK(CreatePageMap<EmptyPages>(probe));
+    sourceState.reference = probe; targetState.reference = probe;
+    ATL::CComObject<PersistentObject>* source = nullptr; ATL::CComObject<PersistentObject>* target = nullptr;
+    CHECK(ATL::CComObject<PersistentObject>::CreateInstance(&source) == S_OK && ATL::CComObject<PersistentObject>::CreateInstance(&target) == S_OK);
+    source->state = &sourceState; target->state = &targetState; source->AddRef(); target->AddRef();
+    ATL::CComPtr<IPersistPropertyBag> save, load; save.Attach(source); load.Attach(target);
+    ATL::CComPtr<IPersist> persist;
+    CHECK(save->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&persist)) == S_OK);
+    CLSID id{}; CHECK(persist->GetClassID(&id) == S_OK && id == MapPageA && save->GetClassID(nullptr) == E_POINTER);
+    CHECK(save->InitNew() == S_OK && source->m_bRequiresSave);
+    CHECK(save->Save(nullptr, TRUE, TRUE) == E_POINTER && load->Load(nullptr, nullptr) == E_POINTER);
+    ATL::CComObject<CallerPropertyBag>* medium = nullptr;
+    CHECK(ATL::CComObject<CallerPropertyBag>::CreateInstance(&medium) == S_OK); medium->AddRef();
+    ATL::CComPtr<IPropertyBag> bag; bag.Attach(medium);
+    auto log = static_cast<IErrorLog*>(medium);
+    medium->owner = save; medium->probe = probe; medium->reenter = true;
+    CHECK(save->Save(bag, FALSE, FALSE) == S_OK && source->m_bRequiresSave && medium->writes == 6);
+    CHECK(medium->values[0].vt == VT_I4 && medium->values[0].lVal == 123 && medium->values[1].lVal == 456);
+    CHECK(medium->values[2].vt == VT_I4 && medium->values[2].lVal == 314 && medium->values[3].vt == VT_BSTR &&
+        ::SysStringLen(medium->values[3].bstrVal) == 3 && medium->values[3].bstrVal[2] == L'B');
+    medium->values[2] = L"271"; target->extent = {1,2}; targetState.number = 9; targetState.flag = FALSE;
+    CHECK(load->Load(bag, log) == S_OK && !target->m_bRequiresSave && targetState.number == 271 && targetState.flag &&
+        targetState.puts[0] == 3 && targetState.puts[1] == 1 && targetState.valid && medium->valid);
+    CHECK(target->extent.cx == 123 && target->extent.cy == 456 && target->guard1 == 0x12345678 && target->guard2 == 0x98765432);
+    CHECK(::SysStringLen(targetState.text) == 3 && targetState.text.m_str[0] == L'A' && !targetState.text.m_str[1] && targetState.text.m_str[2] == L'B');
+    sourceState.text.m_str[0] = L'Z'; CHECK(targetState.text.m_str[0] == L'A' && medium->values[3].bstrVal[0] == L'A');
+    CHECK(save->Save(bag, TRUE, FALSE) == S_OK && !source->m_bRequiresSave && medium->writes == 12);
+    source->m_bRequiresSave = TRUE; medium->failWrite = medium->writes + 2;
+    CHECK(save->Save(bag, TRUE, TRUE) == STG_E_WRITEFAULT && source->m_bRequiresSave);
+    medium->failWrite = 0; medium->missing = 1UL << 2; targetState.number = 777; target->m_bRequiresSave = TRUE;
+    CHECK(load->Load(bag, log) == S_OK && targetState.number == 777 && !target->m_bRequiresSave);
+    medium->missing = 0; medium->values[2] = L"not a number"; target->m_bRequiresSave = TRUE;
+    CHECK(load->Load(bag, log) == DISP_E_TYPEMISMATCH && targetState.number == 777 && target->m_bRequiresSave &&
+        medium->errors == 1 && medium->lastError == DISP_E_TYPEMISMATCH && !::wcscmp(medium->lastName, L"Number"));
+    medium->values[2] = LONG(314); medium->failRead = medium->reads + 1;
+    CHECK(load->Load(bag, log) == STG_E_READFAULT && medium->errors == 2 && target->m_bRequiresSave);
+    medium->failRead = 0; targetState.putFailure = 1;
+    CHECK(load->Load(bag, log) == E_ACCESSDENIED && medium->errors == 3 && target->m_bRequiresSave);
+    targetState.putFailure = 0;
+    const ULONG baseline = probe.p->AddRef() - 1; probe.p->Release();
+    for (int mode = 1; mode <= 3; ++mode) {
+        sourceState.getFailure = mode; source->m_bRequiresSave = TRUE;
+        const HRESULT expected = mode == 1 ? E_ACCESSDENIED : mode == 2 ? E_ABORT : E_OUTOFMEMORY;
+        CHECK(save->Save(bag, TRUE, TRUE) == expected && source->m_bRequiresSave);
+        CHECK(probe.p->AddRef() == baseline + 1 && probe.p->Release() == baseline);
+        medium->throwRead = mode;
+        CHECK(load->Load(bag, log) == (mode == 1 ? E_ABORT : mode == 2 ? E_OUTOFMEMORY : E_UNEXPECTED));
+        CHECK(probe.p->AddRef() == baseline + 1 && probe.p->Release() == baseline);
+        medium->throwRead = 0;
+    }
+    sourceState.getFailure = 0;
+    medium->positiveWrite = true;
+    CHECK(save->Save(bag, TRUE, TRUE) == E_UNEXPECTED && source->m_bRequiresSave);
+    medium->positiveWrite = false; medium->positiveRead = true;
+    CHECK(load->Load(bag, log) == E_UNEXPECTED && target->m_bRequiresSave);
+    medium->positiveRead = false;
+    for (int mode = 1; mode <= 5; ++mode) {
+        PersistentObject::mapFailure = mode;
+        const int reads = medium->reads, writes = medium->writes;
+        const HRESULT expected = mode == 1 ? E_UNEXPECTED : mode == 2 ? E_OUTOFMEMORY : E_INVALIDARG;
+        CHECK(save->Save(bag, TRUE, TRUE) == expected && load->Load(bag, log) == expected);
+        CHECK(medium->reads == reads && medium->writes == writes && source->m_bRequiresSave && target->m_bRequiresSave);
+    }
+    PersistentObject::mapFailure = 7;
+    CHECK(save->Save(bag, TRUE, TRUE) == E_NOINTERFACE && load->Load(bag, log) == E_NOINTERFACE);
+    PersistentObject::mapFailure = 6;
+    const int reads = medium->reads, writes = medium->writes;
+    CHECK(save->Save(bag, FALSE, TRUE) == S_OK && load->Load(bag, log) == S_OK && medium->reads == reads && medium->writes == writes);
+    PersistentObject::mapFailure = 0;
+    CHECK(save->Save(bag, TRUE, TRUE) == S_OK && !source->m_bRequiresSave && load->Load(bag, nullptr) == S_OK && !target->m_bRequiresSave);
+    CHECK(sourceState.valid && targetState.valid && medium->valid);
+    CHECK(medium->AddRef() == 2 && medium->Release() == 1);
+    persist.Release(); medium->reenter = false;
+    medium->dropOwner = save.Detach(); // Callback drops the last outside reference during Save.
+    CHECK(medium->dropOwner->Save(bag, TRUE, TRUE) == S_OK && sourceState.destroyed == 1 &&
+        !sourceState.dirtyAtDestruction && !medium->dropOwner);
+    load.Release(); CHECK(targetState.destroyed == 1);
+    return true;
+}
 size_t DialogBytesFind(const std::vector<BYTE>& bytes, const void* value, size_t size) {
     const auto first = static_cast<const BYTE*>(value);
     return static_cast<size_t>(std::search(bytes.begin(), bytes.end(), first, first + size) - bytes.begin());
@@ -1134,7 +1366,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
-    if (!propertyMaps() || !propertyBrowsing() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!propertyMaps() || !propertyBrowsing() || !persistentProperties() || !dialogTemplates() || !plainDialogs() || !ownerDrawDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

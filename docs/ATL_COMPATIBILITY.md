@@ -22,7 +22,8 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `atlctl.h`: `IObjectSafetyImpl<T, flags>` | Native IObjectSafety QI and supported/enabled flags, masked updates, unsupported-interface/mask failures and public m_dwCurrentSafety state. No COM initialization or security validation is implied. |
 | `atlctl.h`: property notifications | `IPropertyNotifySinkCP<T, CDV>` and `CFirePropNotifyEvent::FireOnChanged/FireOnRequestEdit`, with native sink QI across all points, edit vetoes, preflight/snapshot ownership and reentrant callbacks. See property-notification scope below. |
 | `atlcom.h` / `atlctl.h` | `AtlAdvise`/`AtlUnadvise`, `IDispEventSimpleImpl`, typed `SINK_ENTRY_INFO` maps |
-| `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Map-driven persistence remains pending. |
+| `atlcom.h`: property maps | `ISpecifyPropertyPagesImpl`, `BEGIN_PROP_MAP`/`END_PROP_MAP`, `PROP_PAGE`, typed/legacy property entries and direct-data metadata; native page-list allocation. Stream persistence remains pending. |
+| `atlcom.h`: `IPersistPropertyBagImpl<T>` | Caller-supplied IPropertyBag loading/saving through real Automation properties and checked scalar direct-data entries, EX dispatch IIDs, native VARIANT copying/conversion, dirty-state completion and optional IErrorLog. See property-bag persistence below. |
 | `atlctl.h`: `IPerPropertyBrowsingImpl<T>` | DISPID-to-page mapping, native Automation display strings with EX-interface selection, empty default predefined lists and E_NOTIMPL predefined values. See per-property browsing below. |
 | `atlcom.h`: `IDispEventImpl` | Native registered/source-provided TypeLib metadata, `SINK_ENTRY`/`SINK_ENTRY_EX`/`SINK_ENTRY_EX_P`, independent sink identities, transactional binding and typed invocation. See TypeLib event scope below. |
 | `atlcom.h`: server connection points | `IConnectionPointImpl`, `IConnectionPointContainerImpl`, connection-point maps (including `_P`), `CComDynamicUnkArray`/`CComUnkArray`, native `IEnumConnections`/`IEnumConnectionPoints` snapshots and clones. See connection-point scope below. |
@@ -598,12 +599,12 @@ modes, stdout/stderr contracts, timeout budgets and workflows remain unchanged;
 real printing/hardware HSP remain outside CI and all 36 original blobs and
 whole-application admission are unchanged.
 
-This implements declarations and page discovery; per-property browsing is described
-below. IPersistPropertyBagImpl, IPersistStreamInitImpl, interface-serialization callback
+This implements declarations and page discovery; per-property browsing and
+property-bag persistence are described below. IPersistStreamInitImpl, interface-serialization callback
 entries, IPropertyPageImpl, CAxPropertyPageImpl, control splitting and composite
 controls remain unfinished. A property-map declaration alone does not implement
-storage, loading or saving. Display-string browsing invokes Automation properties;
-direct-data metadata is not read as live object storage.
+storage, loading or saving. The persistence mixin must also be exposed to a caller
+supplying IPropertyBag. Display-string browsing does not access direct-data members.
 
 References: [ISpecifyPropertyPagesImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ispecifypropertypagesimpl-class),
 [property-map macros](https://learn.microsoft.com/en-us/cpp/atl/reference/property-map-macros),
@@ -648,7 +649,7 @@ counts, retry and reentrant page lookup. Existing native property-frame commit
 and cancel cases also read the same control before and after the real modal
 frame: Apply changes the displayed value and Cancel preserves it. No executable,
 test mode, registration, timeout budget, workflow or stderr contract is added.
-Full property-page classes, persistence, interface serialization and original
+Full property-page classes, stream persistence, interface serialization and original
 whole-application qualification remain pending; real printing/hardware HSP
 remain outside CI.
 
@@ -656,6 +657,74 @@ References: [IPerPropertyBrowsingImpl](https://learn.microsoft.com/en-us/cpp/atl
 [MapPropertyToPage](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iperpropertybrowsing-mappropertytopage),
 [GetDisplayString ownership](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iperpropertybrowsing-getdisplaystring),
 [native VariantChangeType](https://learn.microsoft.com/en-us/windows/win32/api/oleauto/nf-oleauto-variantchangetype).
+
+## Property-bag persistence
+
+IPersistPropertyBagImpl<T> in atlcom.h implements GetClassID, InitNew, Load and
+Save over the caller's native IPropertyBag interface. T supplies GetObjectCLSID,
+the stable GetPropertyMap and its usual m_bRequiresSave flag; expose IPersist and
+IPersistPropertyBag in the existing COM map. InitNew returns S_OK without changing
+class defaults. Successful Load clears m_bRequiresSave. Save clears it only after
+complete success with fClearDirty=TRUE; fClearDirty=FALSE leaves it unchanged.
+As in ATL's documented default, both fSaveAllProperties values save all named
+entries. Failed work does not actively clear the dirty flag. The helper retains
+the object through callbacks and the final flag update, and retains the bag/log
+only for this call. It never keeps the medium for a later operation.
+
+Entries are visited in declaration order; PROP_PAGE entries are skipped. Dispatch
+properties are queried through the declared IID, including EX interfaces. Save
+uses native DISPATCH_PROPERTYGET; Load supplies one value and the named
+DISPID_PROPERTYPUT argument, choosing DISPATCH_PROPERTYPUTREF for interface
+values. IID_NULL and LOCALE_USER_DEFAULT are used for Invoke. VariantCopyInd
+turns BYREF results into independently owned values; VariantChangeType performs
+typed conversion when necessary. Legacy VT_EMPTY entries preserve the bag/getter's
+native type. BSTR length, SAFEARRAY and interface ownership follow OLEAUT32 and
+the client bag's copy/serialization contract; this helper creates no object
+factory, wire format or recursive object serializer.
+
+PROP_DATA_ENTRY supports fixed-width I1/UI1, I2/UI2, I4/UI4/INT/UINT, I8/UI8,
+R4/R8, BOOL, DATE, CY and ERROR members, including nested SIZEL extents. Trusted
+compiler metadata is checked against the exact scalar size and sizeof(T) before
+any property read/write. Unsupported direct-data types, mismatched sizes and
+out-of-object offsets return E_INVALIDARG before transfers. BSTR/interface pointers,
+VARIANT, SAFEARRAY, DECIMAL and compound byte blobs are not raw scalar data and
+must use a supported Automation property or a future dedicated implementation.
+The map is trusted source metadata, not an untrusted external schema.
+
+Read receives the declared VARTYPE (VT_EMPTY for legacy entries) and the optional
+IErrorLog. E_INVALIDARG from Read is treated as an absent property and preserves
+that property's existing/default value. Other read failures stop Load; the bag
+owns reporting those read errors. Query/Invoke/conversion errors are reported
+to an optional IErrorLog with the property name and HRESULT; a logger's failure
+does not replace the property error. Exceptions use the existing ATL translation.
+Non-S_OK successful callback results are rejected as E_UNEXPECTED. Null media
+and GetClassID output addresses return E_POINTER; failed GetClassID clears its
+output. A null map returns E_UNEXPECTED. Native temporary variants/interfaces are
+released on failure and exception paths. Transfers are sequential, not atomic:
+earlier setters/writes remain applied if a later property fails. The caller's
+normal COM apartment/synchronization and property setter rules still apply.
+
+Existing pre-OLE ActiveX cases exercise a multiple-inheritance COM object and a
+caller bag/error-log implementation: adjusted EX dispatch pointers, IPersist QI,
+nested extent offsets with surrounding guards, BYREF numbers, embedded-zero
+BSTR independence, legacy Boolean values, interface PUTREF/refcounts, typed
+conversion, missing defaults, both Save flags, read/write/getter/setter errors,
+exception cleanup, optional/advisory logging, invalid metadata preflight,
+page-only maps, retry, reentrant GetClassID and a Write callback dropping the
+last outside object reference. The latter checks destruction only after the
+successful dirty update. No test mode, executable, registration, workflow,
+timeout or stderr allowance is added. COM initialization remains caller-owned.
+
+Stream/storage persistence mixins, global persistence helper APIs, arbitrary
+direct-data serialization, interface-serialization callback entries, full property
+page classes and complete original-application qualification remain pending.
+The 36 pinned original blobs, all 37 whole-application admission gates and real
+printing/hardware HSP exclusion remain unchanged.
+
+References: [IPersistPropertyBagImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ipersistpropertybagimpl-class),
+[native Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersistpropertybag-load),
+[native Save](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersistpropertybag-save),
+[IPropertyBag::Read](https://learn.microsoft.com/en-us/windows/win32/api/oaidl/nf-oaidl-ipropertybag-read).
 
 ## Native property frames
 
@@ -692,7 +761,8 @@ Real printing and hardware HSP remain outside CI; all 36 pinned Microsoft blobs
 and whole-application admission remain unchanged.
 
 Source property-map declarations and page discovery are supported as described
-above, together with per-property browsing. IPropertyPageImpl, CAxPropertyPageImpl, map-driven persistence,
+above, together with per-property browsing and property-bag persistence.
+IPropertyPageImpl, CAxPropertyPageImpl, stream persistence,
 control splitting and full composite-control behavior remain unfinished.
 
 References: [IOleControlSite::ShowPropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iolecontrolsite-showpropertyframe),

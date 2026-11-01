@@ -122,10 +122,14 @@ CoTaskMem array; headers/static maps do not initialize COM. PROP_DATA_ENTRY reco
 member offset/size/type metadata. `IPerPropertyBrowsingImpl` maps individual
 Automation DISPIDs to pages and obtains current display text through native
 IDispatch/VariantChangeType; EX entries select their declared dispatch interface.
-Its default predefined-value list is empty. The full ATL property-page classes
-and map-driven persistence remain unfinished; declaring a map alone does not save data.
+Its default predefined-value list is empty. `IPersistPropertyBagImpl` loads/saves
+mapped dispatch properties and checked scalar data members through the caller's
+IPropertyBag. The full ATL property-page classes, stream persistence and
+interface-serialization callbacks remain unfinished; declaring a map alone does
+not save data.
 See [property-map scope](ATL_COMPATIBILITY.md#property-map-page-discovery).
 See [per-property browsing](ATL_COMPATIBILITY.md#per-property-browsing).
+See [property-bag persistence](ATL_COMPATIBILITY.md#property-bag-persistence).
 See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.

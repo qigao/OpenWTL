@@ -257,6 +257,127 @@ public:
     }
 };
 
+namespace detail {
+inline SIZE_T PropertyScalarSize(VARTYPE type) noexcept {
+    switch (type) {
+    case VT_I1: case VT_UI1: return 1;
+    case VT_I2: case VT_UI2: case VT_BOOL: return 2;
+    case VT_I4: case VT_UI4: case VT_INT: case VT_UINT: case VT_R4: case VT_ERROR: return 4;
+    case VT_I8: case VT_UI8: case VT_R8: case VT_DATE: case VT_CY: return 8;
+    default: return 0;
+    }
+}
+inline HRESULT PropertyBagError(IErrorLog* log, LPCOLESTR name, HRESULT error) {
+    if (log) {
+        EXCEPINFO info{}; info.scode = error;
+        // Logging is advisory and must not replace the property failure.
+        try { log->AddError(name, &info); } catch (...) {}
+    }
+    return error;
+}
+template<class T>
+HRESULT TransferPropertyBag(T* object, IUnknown* identity, IPropertyBag* medium,
+                           IErrorLog* errorLog, bool load) {
+    CComPtr<IPropertyBag> bag(medium);
+    CComPtr<IErrorLog> log(errorLog);
+    const _ATL_PROP_ENTRY* map = T::GetPropertyMap();
+    if (!map) return E_UNEXPECTED;
+    // Validate every direct-data record before property reads/writes or
+    // touching object storage. Pointer-owning/compound members are not bytes.
+    for (const auto* entry = map; !PropertyMapEnd(*entry); ++entry) {
+        if (!entry->szDesc || entry->piidDispatch) continue;
+        const SIZE_T size = PropertyScalarSize(entry->vt);
+        if (!size || size != entry->dwSizeData || entry->dwOffsetData > sizeof(T) ||
+            size > sizeof(T) - entry->dwOffsetData)
+            return PropertyBagError(log, entry->szDesc, E_INVALIDARG);
+    }
+    for (const auto* entry = map; !PropertyMapEnd(*entry); ++entry) {
+        if (!entry->szDesc) continue; // PROP_PAGE is presentation metadata.
+        CComVariant value, normalized, converted;
+        CComPtr<IDispatch> dispatch;
+        HRESULT hr = S_OK;
+        if (load) {
+            value.vt = entry->vt;
+            hr = bag->Read(entry->szDesc, &value, log);
+            if (hr == E_INVALIDARG) continue; // Missing property: preserve the class default.
+            if (FAILED(hr)) return hr; // Read owns its own IErrorLog reporting.
+            if (hr != S_OK) return PropertyBagError(log, entry->szDesc, E_UNEXPECTED);
+        }
+        if (entry->piidDispatch) {
+            const IID dispatchId = *entry->piidDispatch;
+            hr = identity->QueryInterface(dispatchId, reinterpret_cast<void**>(&dispatch.p));
+            if (hr != S_OK || !dispatch)
+                return PropertyBagError(log, entry->szDesc, FAILED(hr) ? hr : E_UNEXPECTED);
+            if (!load) {
+                DISPPARAMS arguments{};
+                hr = dispatch->Invoke(entry->dispid, IID_NULL, LOCALE_USER_DEFAULT,
+                    DISPATCH_PROPERTYGET, &arguments, &value, nullptr, nullptr);
+                if (hr != S_OK) return PropertyBagError(log, entry->szDesc, FAILED(hr) ? hr : E_UNEXPECTED);
+            }
+        } else if (!load) {
+            value.vt = entry->vt;
+            std::memcpy(&value.cVal, reinterpret_cast<const BYTE*>(object) + entry->dwOffsetData,
+                entry->dwSizeData);
+        }
+        hr = ::VariantCopyInd(&normalized, &value);
+        if (FAILED(hr)) return PropertyBagError(log, entry->szDesc, hr);
+        VARIANT* property = &normalized;
+        if (entry->vt != VT_EMPTY && normalized.vt != entry->vt) {
+            hr = ::VariantChangeType(&converted, &normalized, 0, entry->vt);
+            if (FAILED(hr)) return PropertyBagError(log, entry->szDesc, hr);
+            property = &converted;
+        }
+        if (!load) {
+            hr = bag->Write(entry->szDesc, property);
+        } else if (dispatch) {
+            DISPID named = DISPID_PROPERTYPUT;
+            DISPPARAMS arguments{property, &named, 1, 1};
+            const WORD flags = property->vt == VT_UNKNOWN || property->vt == VT_DISPATCH ?
+                DISPATCH_PROPERTYPUTREF : DISPATCH_PROPERTYPUT;
+            hr = dispatch->Invoke(entry->dispid, IID_NULL, LOCALE_USER_DEFAULT,
+                flags, &arguments, nullptr, nullptr, nullptr);
+        } else {
+            std::memcpy(reinterpret_cast<BYTE*>(object) + entry->dwOffsetData, &property->cVal,
+                entry->dwSizeData);
+        }
+        if (hr != S_OK) return PropertyBagError(log, entry->szDesc, FAILED(hr) ? hr : E_UNEXPECTED);
+    }
+    return S_OK;
+}
+} // namespace detail
+
+template<class T>
+class ATL_NO_VTABLE IPersistPropertyBagImpl : public IPersistPropertyBag {
+public:
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = CLSID_NULL;
+        try { *output = T::GetObjectCLSID(); return S_OK; }
+        catch (...) { return detail::AtlObjectException(); }
+    }
+    HRESULT STDMETHODCALLTYPE InitNew() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Load(IPropertyBag* bag, IErrorLog* log) override {
+        if (!bag) return E_POINTER;
+        try {
+            CComPtr<IPersistPropertyBag> self(this); // Includes the dirty-state update below.
+            auto object = static_cast<T*>(this);
+            const HRESULT hr = detail::TransferPropertyBag(object, self.p, bag, log, true);
+            if (hr == S_OK) object->m_bRequiresSave = FALSE;
+            return hr;
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+    HRESULT STDMETHODCALLTYPE Save(IPropertyBag* bag, BOOL clearDirty, BOOL /*saveAll*/) override {
+        if (!bag) return E_POINTER;
+        try {
+            CComPtr<IPersistPropertyBag> self(this);
+            auto object = static_cast<T*>(this);
+            const HRESULT hr = detail::TransferPropertyBag(object, self.p, bag, nullptr, false);
+            if (hr == S_OK && clearDirty) object->m_bRequiresSave = FALSE;
+            return hr; // ATL's default saves all declared properties in either mode.
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+};
+
 template<class Base>
 class CComObject : private detail::AtlObjectModulePin, public Base {
 public:
