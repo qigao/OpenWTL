@@ -523,7 +523,7 @@ bool persistentProperties() {
     CHECK(save->Save(bag, TRUE, TRUE) == S_OK && !source->m_bRequiresSave && load->Load(bag, nullptr) == S_OK && !target->m_bRequiresSave);
     CHECK(sourceState.valid && targetState.valid && medium->valid);
     CHECK(medium->AddRef() == 2 && medium->Release() == 1);
-    persist.Release(); medium->reenter = false;
+    persist.Release(); medium->reenter = false; source->m_bRequiresSave = TRUE;
     medium->dropOwner = save.Detach(); // Callback drops the last outside reference during Save.
     CHECK(medium->dropOwner->Save(bag, TRUE, TRUE) == S_OK && sourceState.destroyed == 1 &&
         !sourceState.dirtyAtDestruction && !medium->dropOwner);
