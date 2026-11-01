@@ -108,8 +108,8 @@ bool dialogTemplates() {
         bad = snapshot; const WORD unmatched = 799;
         std::memcpy(bad.data(), &unmatched, sizeof(unmatched));
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
-        bad = snapshot; const WORD storage = 0x377;
-        std::memcpy(bad.data() + 2, &storage, sizeof(storage));
+        bad = snapshot; const WORD binding = 0x37A;
+        std::memcpy(bad.data() + 2, &binding, sizeof(binding));
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_NOT_SUPPORTED);
         bad = snapshot; bad.push_back(1);
         CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
@@ -158,6 +158,36 @@ bool dialogTemplates() {
             std::memcpy(bad.data() + 2, &stream, sizeof(stream));
             CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
         }
+    }
+    for (WORD id : {WORD(631), WORD(632), WORD(633), WORD(636)}) {
+        const HRSRC dialog = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        const HRSRC init = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(dialog && init);
+        const auto bytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, dialog)));
+        const auto initBytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, init)));
+        const DWORD size = ::SizeofResource(instance, dialog), initSize = ::SizeofResource(instance, init);
+        const std::vector<BYTE> snapshot(initBytes, initBytes + initSize);
+        const size_t minimum = id == 632 ? 2614 : id == 633 ? 2598 : id == 636 ? 5146 : 2574;
+        CHECK(initSize >= minimum && initSize - minimum <= 3);
+        AxDialogTemplate built;
+        CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, initSize) == ERROR_SUCCESS && built.converted);
+        CHECK(built.initialization.size() == (id == 633 ? 3U : id == 636 ? 2U : 1U));
+        CHECK(built.initialization[0].id == 711 && built.initialization[0].kind == ATL::detail::AxDialogInit::Kind::Storage);
+        CHECK(built.initialization[0].stream.size() == 2560);
+        CHECK(built.initialization[0].license == (id == 632 ? L"OpenATL-test-license" : L""));
+        if (id == 633) {
+            CHECK(built.initialization[1].id == 712 && built.initialization[1].kind == ATL::detail::AxDialogInit::Kind::New);
+            CHECK(built.initialization[2].id == 713 && built.initialization[2].kind == ATL::detail::AxDialogInit::Kind::Stream);
+        }
+        CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        for (size_t cut = 0; cut < minimum; ++cut) {
+            CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
+        }
+        std::vector<BYTE> bad = snapshot; const DWORD oversized = MAXDWORD;
+        std::memcpy(bad.data() + 4, &oversized, sizeof(oversized));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; std::memcpy(bad.data() + 8, &oversized, sizeof(oversized));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
     }
     return true;
 }
@@ -259,6 +289,8 @@ bool plainDialogs() {
         CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == error);
         CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == error);
     }
+    CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(635), nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_INVALID_DATA);
+    CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(635), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == ERROR_INVALID_DATA);
     PlainDialog plain; plain.modal = true;
     CHECK(plain.GetIDD() == 602 && plain.GetDialogProc());
     CHECK(plain.DoModal(nullptr, 1234) == 73 && plain.initialized == 1 && plain.finalized == 1 && plain.parameter == 1234 && plain.modeRejected && !plain.m_hWnd);

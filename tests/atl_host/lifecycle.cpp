@@ -14,13 +14,15 @@ struct ControlState {
     CLSID classId{};
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
     bool siteOrder = true, licenseSeen = false;
+    bool storageInterface = true, storageReadOnly = true, rejectLicense = false, destroyDuringStorageQuery = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     ULONG streamBytes = 4;
     int failInitializationAt = 0;
     HWND window = nullptr;
     int initialized = 0, loaded = 0, activated = 0, detached = 0, closed = 0, destroyed = 0;
+    int storageLoaded = 0, storageReleased = 0, lateStorageReads = 0;
 };
-class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IRunnableObject {
+class Control : public IOleObject, public IPersistStreamInit, public IPersistStream, public IPersistStorage, public IRunnableObject {
 public:
     explicit Control(ControlState& state) : state_(state) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
@@ -28,6 +30,10 @@ public:
         if (iid == IID_IUnknown || iid == IID_IOleObject) *value = static_cast<IOleObject*>(this);
         else if (iid == IID_IPersistStreamInit && state_.initInterface) *value = static_cast<IPersistStreamInit*>(this);
         else if (iid == IID_IPersist || iid == IID_IPersistStream) *value = static_cast<IPersistStream*>(this);
+        else if (iid == IID_IPersistStorage && state_.storageInterface) {
+            *value = static_cast<IPersistStorage*>(this);
+            if (state_.destroyDuringStorageQuery) ::DestroyWindow(state_.window);
+        }
         else if (iid == IID_IRunnableObject) *value = static_cast<IRunnableObject*>(this);
         else return E_NOINTERFACE;
         AddRef(); return S_OK;
@@ -47,7 +53,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetClientSite(IOleClientSite** site) override { return site_.CopyTo(site); }
     HRESULT STDMETHODCALLTYPE SetHostNames(LPCOLESTR, LPCOLESTR) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE Close(DWORD) override { ++state_.closed; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Close(DWORD) override {
+        ++state_.closed;
+        if (storage_) { storage_.Release(); ++state_.storageReleased; }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE SetMoniker(DWORD, IMoniker*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetMoniker(DWORD, DWORD, IMoniker**) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE InitFromData(IDataObject*, BOOL, DWORD) override { return E_NOTIMPL; }
@@ -62,7 +72,14 @@ public:
     HRESULT STDMETHODCALLTYPE GetUserClassID(CLSID* id) override { return GetClassID(id); }
     HRESULT STDMETHODCALLTYPE GetUserType(DWORD, LPOLESTR*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE SetExtent(DWORD, SIZEL*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetExtent(DWORD, SIZEL*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetExtent(DWORD, SIZEL* size) override {
+        if (!storage_) return E_NOTIMPL;
+        if (!size) return E_POINTER;
+        DWORD marker = 0;
+        HRESULT hr = ReadStorage(storage_, marker);
+        if (SUCCEEDED(hr)) { size->cx = static_cast<LONG>(marker); size->cy = 4; ++state_.lateStorageReads; }
+        return hr;
+    }
     HRESULT STDMETHODCALLTYPE Advise(IAdviseSink*, DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Unadvise(DWORD) override { return OLE_E_NOCONNECTION; }
     HRESULT STDMETHODCALLTYPE EnumAdvise(IEnumSTATDATA**) override { return E_NOTIMPL; }
@@ -87,24 +104,54 @@ public:
     HRESULT STDMETHODCALLTYPE Save(IStream*, BOOL) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetSizeMax(ULARGE_INTEGER* size) override { if (!size) return E_POINTER; size->QuadPart = 4; return S_OK; }
     HRESULT STDMETHODCALLTYPE InitNew() override { ++state_.initialized; return Initialize(); }
+    HRESULT STDMETHODCALLTYPE Load(IStorage* storage) override {
+        if (!storage) return E_POINTER;
+        if (storage_) return CO_E_ALREADYINITIALIZED;
+        DWORD marker = 0;
+        HRESULT hr = ReadStorage(storage, marker);
+        if (FAILED(hr)) return hr;
+        STATSTG stat{};
+        if (storage->Stat(&stat, STATFLAG_NONAME) != S_OK || (stat.grfMode & 3) != STGM_READ) return E_FAIL;
+        ATL::CComPtr<IStream> forbidden;
+        state_.storageReadOnly = state_.storageReadOnly && FAILED(storage->CreateStream(L"Forbidden", STGM_WRITE | STGM_SHARE_EXCLUSIVE, 0, 0, &forbidden));
+        if (!state_.storageReadOnly || forbidden) return E_FAIL;
+        storage_ = storage; ++state_.storageLoaded;
+        return Initialize();
+    }
+    HRESULT STDMETHODCALLTYPE InitNew(IStorage*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Save(IStorage*, BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SaveCompleted(IStorage*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE HandsOffStorage() override {
+        if (storage_) { storage_.Release(); ++state_.storageReleased; }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetRunningClass(CLSID* id) override { return GetClassID(id); }
     HRESULT STDMETHODCALLTYPE Run(IBindCtx*) override { return S_OK; }
     BOOL STDMETHODCALLTYPE IsRunning() override { return TRUE; }
     HRESULT STDMETHODCALLTYPE LockRunning(BOOL, BOOL) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetContainedObject(BOOL) override { return S_OK; }
 private:
+    static HRESULT ReadStorage(IStorage* storage, DWORD& marker) {
+        ATL::CComPtr<IStream> stream;
+        HRESULT hr = storage->OpenStream(L"Marker", nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &stream);
+        if (FAILED(hr)) return hr;
+        ULONG read = 0;
+        hr = stream->Read(&marker, sizeof(marker), &read);
+        return SUCCEEDED(hr) && read == sizeof(marker) && marker == 42 ? S_OK : E_FAIL;
+    }
     HRESULT Initialize() {
         state_.siteOrder = state_.siteOrder && (static_cast<bool>(site_.p) == state_.siteFirst);
         if (state_.destroyDuringInit) ::DestroyWindow(state_.window);
         if (state_.destroyDialogDuringInit) ::DestroyWindow(::GetParent(state_.window));
         if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
         return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
-            state_.initialized + state_.loaded == state_.failInitializationAt) ? E_FAIL : S_OK;
+            state_.initialized + state_.loaded + state_.storageLoaded == state_.failInitializationAt) ? E_FAIL : S_OK;
     }
     ~Control() { ++state_.destroyed; }
     ULONG refs_ = 1;
     ControlState& state_;
     ATL::CComPtr<IOleClientSite> site_;
+    ATL::CComPtr<IStorage> storage_;
 };
 class Factory : public IClassFactory2 {
 public:
@@ -131,7 +178,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE CreateInstanceLic(IUnknown* outer, IUnknown*, REFIID iid, BSTR key, void** value) override {
         if (!value) return E_POINTER; *value = nullptr;
-        if (!key || ::SysStringLen(key) != 20 || std::memcmp(key, L"OpenATL-test-license", 20 * sizeof(WCHAR))) return CLASS_E_NOTLICENSED;
+        if (state_.rejectLicense || !key || ::SysStringLen(key) != 20 || std::memcmp(key, L"OpenATL-test-license", 20 * sizeof(WCHAR))) return CLASS_E_NOTLICENSED;
         state_.licenseSeen = true; return CreateInstance(outer, iid, value);
     }
 private:
@@ -192,7 +239,7 @@ public:
     ControlState& state;
     bool modal = false, closeInInit = false, good = true;
     int initialized = 0, finalized = 0;
-    int expectedNew = 0, expectedLoads = 1, expectedActivations = 1;
+    int expectedNew = 0, expectedLoads = 1, expectedActivations = 1, expectedStorages = 0;
     explicit ResourceDialog(ControlState& value) : state(value) {}
     int GetIDD() const { return resource; }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
@@ -200,9 +247,14 @@ public:
         ATL::CComPtr<IOleObject> control;
         good = parameter == 1773 && state.loaded == expectedLoads && state.initialized == expectedNew && state.activated == expectedActivations &&
             GetDlgControl(711, IID_IOleObject, reinterpret_cast<void**>(&control)) == S_OK && ::GetDlgItem(m_hWnd, 714);
+        good = good && state.storageLoaded == expectedStorages;
+        if (expectedStorages) {
+            SIZEL extent{};
+            good = good && control->GetExtent(DVASPECT_CONTENT, &extent) == S_OK && extent.cx == 42 && extent.cy == 4;
+        }
         WCHAR hostClass[32]{};
         good = ::GetClassNameW(::GetDlgItem(m_hWnd, 711), hostClass, 32) &&
-            !::wcscmp(hostClass, resource == 611 || resource == 621 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
+            !::wcscmp(hostClass, resource == 611 || resource == 621 || resource == 632 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
         if (modal) good = EndDialog(93) && good;
         else if (closeInInit) good = DestroyWindow() && good;
         return TRUE;
@@ -220,13 +272,18 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
-    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622)}) for (int mode = 0; mode < 5; ++mode) {
+    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622), WORD(631), WORD(632), WORD(633)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
         state.sendInitDuringLoad = mode == 4;
         state.streamBytes = resource == 619 ? 5 : 4;
         ResourceDialog dialog(state); dialog.resource = resource; dialog.modal = mode == 3;
-        if (resource >= 620) {
+        if (resource >= 631) {
+            dialog.expectedStorages = 1;
+            dialog.expectedNew = resource == 633 && state.initInterface ? 1 : 0;
+            dialog.expectedLoads = resource == 633 ? 1 : 0;
+            dialog.expectedActivations = resource == 633 ? 3 : 1;
+        } else if (resource >= 620) {
             dialog.expectedNew = state.initInterface ? 1 : 0;
             dialog.expectedLoads = resource == 622 ? 1 : 0;
             dialog.expectedActivations = resource == 622 ? 2 : 1;
@@ -239,7 +296,9 @@ bool resourceInitialization() {
         }
         REQUIRE(dialog.good && dialog.initialized == 1 && dialog.finalized == 1 && !dialog.m_hWnd);
         REQUIRE(state.siteOrder && state.loaded == dialog.expectedLoads && state.initialized == dialog.expectedNew && state.activated == dialog.expectedActivations);
-        REQUIRE(state.licenseSeen == (resource == 612 || resource == 619));
+        REQUIRE(state.licenseSeen == (resource == 612 || resource == 619 || resource == 632));
+        REQUIRE(state.storageReadOnly && state.storageReleased == dialog.expectedStorages);
+        if (dialog.expectedStorages) REQUIRE(state.lateStorageReads == 1);
         REQUIRE(state.detached == dialog.expectedActivations && state.closed == dialog.expectedActivations &&
             state.destroyed == dialog.expectedActivations && module.GetLockCount() == 0);
     }
@@ -291,6 +350,41 @@ bool resourceInitialization() {
         REQUIRE(dialog.Create(nullptr, 1773) && dialog.good);
         REQUIRE(dialog.DestroyWindow() && module.GetLockCount() == 0);
     }
+    for (int mode = 0; mode < 9; ++mode) for (bool modal : {false, true}) {
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        state.storageInterface = mode != 1;
+        state.failInit = mode == 2;
+        state.destroyDuringInit = mode == 3;
+        state.destroyDialogDuringInit = mode == 4;
+        state.failInitializationAt = mode == 5 ? 2 : 0;
+        state.rejectLicense = mode == 7;
+        state.destroyDuringStorageQuery = mode == 8;
+        ResourceDialog dialog(state); dialog.modal = modal;
+        dialog.resource = mode == 0 ? 634 : mode == 5 ? 636 : mode == 7 ? 632 : 631;
+        dialog.expectedLoads = 0; dialog.expectedStorages = 1; dialog.closeInInit = mode == 6;
+        if (mode == 6 && modal) REQUIRE(dialog.DoModal(nullptr, 1773) == 93);
+        else if (modal) REQUIRE(dialog.DoModal(nullptr, 1773) == -1);
+        else REQUIRE(!dialog.Create(nullptr, 1773));
+        REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0 && !state.initialized && !state.loaded);
+        REQUIRE(dialog.initialized == (mode == 6 ? 1 : 0) && dialog.finalized == (mode == 6 ? 1 : 0));
+        REQUIRE(state.storageLoaded == (mode == 0 || mode == 1 || mode == 7 || mode == 8 ? 0 : mode == 5 ? 2 : 1));
+        REQUIRE(state.storageReleased == state.storageLoaded && state.storageReadOnly);
+        REQUIRE(state.activated == (mode == 5 || mode == 6 ? 1 : 0));
+        REQUIRE(state.destroyed == (mode == 0 || mode == 7 ? 0 : mode == 5 ? 2 : 1));
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        dialog.resource = 631; dialog.modal = false; dialog.closeInInit = false;
+        REQUIRE(dialog.Create(nullptr, 1773) && dialog.good);
+        REQUIRE(dialog.DestroyWindow() && state.storageReleased == 1 && module.GetLockCount() == 0);
+    }
+    state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+    ResourceDialog retainedDialog(state); retainedDialog.resource = 631;
+    retainedDialog.expectedLoads = 0; retainedDialog.expectedStorages = 1;
+    REQUIRE(retainedDialog.Create(nullptr, 1773) && retainedDialog.good && state.lateStorageReads == 1);
+    ATL::CComPtr<IOleObject> retained;
+    REQUIRE(retainedDialog.GetDlgControl(711, IID_IOleObject, reinterpret_cast<void**>(&retained)) == S_OK);
+    REQUIRE(retainedDialog.DestroyWindow() && !state.destroyed && state.storageReleased == 1 && module.GetLockCount() == 0);
+    SIZEL closedExtent{}; REQUIRE(retained->GetExtent(DVASPECT_CONTENT, &closedExtent) == E_NOTIMPL);
+    retained.Release(); REQUIRE(state.destroyed == 1);
     return true;
 }
 struct ActiveState { bool inside = false, diedInside = false; int destroyed = 0, calls = 0; };
