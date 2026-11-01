@@ -1,0 +1,50 @@
+// Own native event metadata. The pinned Microsoft sample IDLs remain unchanged.
+import "oaidl.idl";
+import "ocidl.idl";
+[
+    uuid(D7022AF1-51CE-49AF-9872-1140D1824961), version(1.0)
+]
+library OpenATLEventLib
+{
+    importlib("stdole2.tlb");
+    typedef enum OpenATLEventState { EventIdle = 0, EventReady = 2 } OpenATLEventState;
+    typedef LONG OpenATLEventCount;
+    [uuid(D7022AF2-51CE-49AF-9872-1140D1824961)]
+    dispinterface _IOpenATLDispatchEvents
+    {
+        properties:
+        methods:
+        [id(101)] void Changed([in] LONG number, [in] VARIANT_BOOL enabled, [in] BSTR text);
+        [id(102)] void Adjust([in, out] LONG* value);
+        [id(103)] void State([in] OpenATLEventState state, [in] OpenATLEventCount count);
+        [id(104)] void Bundle([in] VARIANT value);
+        [id(105)] void TooMany([in] LONG a, [in] LONG b, [in] LONG c, [in] LONG d,
+            [in] LONG e, [in] LONG f, [in] LONG g, [in] LONG h, [in] LONG i);
+        [id(106)] void Object([in] IDispatch* object);
+    };
+    [uuid(D7022AF4-51CE-49AF-9872-1140D1824961)]
+    dispinterface _IOpenATLSourceDispatch
+    {
+        properties:
+        [id(201), readonly] LONG Current;
+        methods:
+    };
+    [uuid(D7022AE3-51CE-49AF-9872-1140D1824961)]
+    coclass EventFixtureSource
+    {
+        [default] dispinterface _IOpenATLSourceDispatch;
+        [default, source] dispinterface _IOpenATLDispatchEvents;
+    };
+    [uuid(D7022AF0-51CE-49AF-9872-1140D1824961)]
+    coclass PersistEventFixtureSource
+    {
+        [default] dispinterface _IOpenATLSourceDispatch;
+        [default, source] dispinterface _IOpenATLDispatchEvents;
+    };
+    [uuid(D7022AF5-51CE-49AF-9872-1140D1824961)]
+    coclass NoDefaultEventFixtureSource
+    {
+        // Incoming-only metadata has no default outgoing interface.
+        [default] dispinterface _IOpenATLSourceDispatch;
+    };
+};

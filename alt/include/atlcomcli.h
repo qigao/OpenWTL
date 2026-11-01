@@ -81,7 +81,7 @@ public:
 
     CComPtr<T>& operator=(CComPtr<T>&& lp) noexcept
     {
-        if (this != &lp) {
+        if (this != std::addressof(lp)) {
             if (p != NULL)
                 p->Release();
             p = lp.p;
@@ -563,6 +563,20 @@ public:
     {
         ::VariantInit(this);
         (void)Copy(static_cast<const VARIANT*>(&varSrc));
+    }
+
+    CComVariant(LPSAFEARRAY source)
+    {
+        ::VariantInit(this);
+        if (!source) return;
+        VARTYPE element = VT_EMPTY;
+        HRESULT hr = ::SafeArrayGetVartype(source, &element);
+        if (FAILED(hr)) AtlThrow(hr);
+        SAFEARRAY* copy = nullptr;
+        hr = ::SafeArrayCopy(source, &copy);
+        if (FAILED(hr)) AtlThrow(hr);
+        vt = static_cast<VARTYPE>(VT_ARRAY | element);
+        parray = copy;
     }
 
     CComVariant(LPCOLESTR lpszSrc)

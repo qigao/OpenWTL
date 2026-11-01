@@ -3,17 +3,18 @@
 COM Server and COM Client are both mandatory OpenATL capabilities. The
 existing source-owned server core under `OpenATL::COM` complements
 `atlcom.h` and provides
-nonaggregated COM objects, explicit interface/class tables, class factories,
+ordinary and aggregated COM objects, explicit interface/class tables, class factories,
 module lifetime accounting, and explicit registry registration. Standard ATL
 DLL module exports and `OBJECT_ENTRY_AUTO` class discovery exist. A class
 can now supply its own real `UpdateRegistry(BOOL)` callback to participate
 in deterministic automatic DLL registration; the callback is not inferred
-from the CLSID. RGS resources, type-library registration, aggregation and
-the full ATL COM Server API remain compatibility gaps.
+from the CLSID. Bounded RGS resources, per-user type-library registration,
+basic/automatic/poly aggregation and tear-offs have implemented subsets.
+Full RGS/registration semantics and the complete ATL COM Server API remain gaps.
 
 For conventional ATL object declarations, `atlcom.h` supplies the
-[nonaggregated object and COM-map compatibility subset](ATL_COMPATIBILITY.md).
-Its module-aware creator plugs into the same explicit class table. Local
+[object, aggregation, tear-off and COM-map compatibility subsets](ATL_COMPATIBILITY.md).
+Their module-aware creators plug into the same class table. Local
 ATL-style creation retains zero-ref semantics and pins an active application
 CAtlModule if present; DLL classes still use the explicit COM::Module-aware
 creator. The [modern EXE module](ATL_MODULE.md) separately owns its COM startup
@@ -40,7 +41,8 @@ and explicit process-local class registration.
   callback, worker, or an external DLL call. The host must obey COM unload
   rules and retire its own external callers.
 - `GetClassObject` and `CreateInstance` clear valid output pointers before
-  failure. Unknown CLSIDs/IIDs fail explicitly; aggregation is rejected.
+  failure. Unknown CLSIDs/IIDs fail explicitly; aggregation follows the class
+  creator policy, and requires IID_IUnknown when a controlling outer is supplied.
   Derived constructors may throw; creation translates allocation failure to
   `E_OUTOFMEMORY` and other C++ exceptions to `E_UNEXPECTED`.
 - The server never initializes COM, including in `DllMain`. The client owns
@@ -515,3 +517,198 @@ References:
 - https://learn.microsoft.com/en-us/windows/win32/api/unknwnbase/nn-unknwnbase-iclassfactory
 - https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-dllcanunloadnow
 - https://learn.microsoft.com/en-us/windows/win32/com/in-process-server-threading-issues
+
+## Basic ATL aggregation and creator policies
+
+CComCoClass selects the standard default aggregatable policy. The class may
+select DECLARE_AGGREGATABLE, DECLARE_NOT_AGGREGATABLE or
+DECLARE_ONLY_AGGREGATABLE. OBJECT_ENTRY_AUTO honors these built-in policies;
+it no longer hardwires every class to CComObject. An aggregate factory request
+must ask for IID_IUnknown; invalid requests fail before allocation or touching
+the outer. Aggregate-only nonaggregated creation returns E_FAIL.
+
+CComAggObject owns a separate nondelegating IUnknown and contains a
+CComContainedObject whose public interface QI/AddRef/Release delegate to the
+borrowed controlling outer. Raw CreateInstance(outer, &raw) returns zero
+references, matching CComObject. Acquire a raw reference immediately. The outer
+owns the nondelegating inner IUnknown and must release it during destruction;
+the inner must not retain the controlling outer just for existing.
+
+COM_INTERFACE_ENTRY_AGGREGATE and its BLIND form query an explicitly supplied
+inner. Simple entries return borrowed pointers internally, while delegated QI
+returns an owned result. That distinction propagates through chained maps so
+public QI owns exactly one reference and every exposed interface returns the
+same controlling IUnknown. A simple/chained entry supplies outer IUnknown;
+aggregate entries never replace it.
+
+The explicit ClassEntry {CLSID, Creator} form keeps its existing nonaggregated
+callback. An optional third createWithOuter callback accepts the controlling
+IUnknown and uses the same Module/ClassFactory engine. Exactly one callback
+must be present. Both object wrappers bind the engine before FinalConstruct
+and retain it through FinalRelease and the contained destructor.
+
+Existing --core tests cover creator policies, raw zero refs, pointer errors,
+independent inner/outer counts, specific/blind/chained aggregate maps, failure
+HRESULTs/exceptions and module pins. The existing real DLL --sta/--mta tests
+exercise direct factory creation without COM initialization and native
+CoCreateInstance aggregation after installation, then verify real methods,
+canonical identity, reference retirement, DllCanUnloadNow and unload.
+
+This basic aggregation milestone does not qualify CComPolyObject,
+arbitrary custom factory policies or the whole
+original COMMap application. It introduces no second factory provider or test
+entry point, and no printer/hardware-HSP CI requirement.
+
+## Ordinary and cached tear-offs
+
+CComTearOffObject implements a separately counted interface object. It retains
+one controlling-owner reference while alive, queries its own map first, uses
+the owner's IUnknown for identity and forwards missing interfaces to the owner.
+Another owner QI creates a new ordinary instance. The owner reference survives
+FinalRelease and the tear-off Base destructor.
+
+CComCachedTearOffObject has a private, separately counted IUnknown. The owner
+keeps one private reference in the declared raw slot (including CComPtr.p),
+while every public contained interface retains the controlling owner. Repeated
+queries reuse the same cached instance; there is no permanent owner/cache
+reference cycle. The owner releases the private IUnknown in FinalRelease.
+
+The existing core suite tests independent instance/cache identities, fallback
+QI, owner retention after the original pointer is released, exact destruction
+ordering, HRESULT/exception/allocation failure and retry, recursive construction
+rejection, eight-thread first-publication and aggregated owner data. The same
+MIDL-generated original ITearOff1/2 interfaces now run through real vtable
+calls in the existing EXE/DLL cases. The unchanged original library omits
+these unreferenced interface descriptions; GetTypeInfo must report
+TYPE_E_ELEMENTNOTFOUND. Both tear-offs additionally implement the original
+IOuter interface, whose actual embedded/registered type information drives
+GetTypeInfo/GetIDsOfNames/Invoke with a short argument and BSTR result.
+A retained cached IOuter is invoked after the DLL owner pointer is released.
+No original Microsoft application is thereby marked qualified.
+
+m_pOwner deliberately stores the actual Owner*; the exact Microsoft
+CComObject<Owner>* member type and layout remain unqualified. See
+ATL_COMPATIBILITY.md for the typed-owner and construction-lock contracts.
+CComPolyObject, full original COMMap admission and
+arbitrary custom factories remain separate work. Hardware HSP and printer
+CI remain retired.
+
+
+## Automatic aggregate COM-map entries
+
+COM_INTERFACE_ENTRY_AUTOAGGREGATE and its BLIND form lazily activate a native
+in-process class with the controlling outer and IID_IUnknown. The owner holds
+one private inner reference and releases it during FinalRelease; public inner
+interfaces retain the owner. A successful activation is cached even when the
+requested interface is absent. Activation failures keep a null slot and may
+retry. Blind entries continue to later map entries after any failure; specific
+entries return the failure. Existing explicit AGGREGATE_BLIND entries follow
+the same failed-query fallthrough rule.
+
+Existing core cases prove absent-COM failure without implicit initialization,
+prepopulated slots without activation and explicit blind failure fallthrough.
+The existing native STA/MTA cases register an actual process-local class
+factory through the same Module engine and exercise raw/CComPtr slots,
+specific/blind/chained maps, exact QI reference ownership, missing-interface
+cache retention, activation HRESULTs/exceptions/allocation failures and retry,
+recursive creation rejection, nested controlling owners and module pinning
+after factory revocation. The MTA case checks eight-thread first creation.
+The same cases also auto-aggregate the real registered DLL class, call its
+methods and prove owner retention and DLL unload after the last public release.
+No test entry, target, workflow or printer/hardware probe is added.
+
+The caller owns COM startup and apartment/marshalling policy. Construction
+uses the owner's lock and bounded recursion guard; see ATL_COMPATIBILITY.md
+for its reentrancy, blocking-hook and slot replacement contracts. This does
+not qualify remote aggregation or the complete original COMMap project.
+
+
+## Native rich error information
+
+CComCoClass::Error and AtlReportError expose all six documented text/ANSI/resource
+forms using native OLE ICreateErrorInfo/IErrorInfo. ISupportErrorInfoImpl provides
+the single-IID support declaration. Metadata is copied into the native error
+object, with IID, help context/file and an optional registered ProgID source.
+Explicit HRESULTs are preserved; text defaults to DISP_E_EXCEPTION and resource
+IDs use FACILITY_ITF. Missing resources report `Unknown Error.` in release builds
+and assert in debug builds. Metadata preparation failures clear stale state and
+preserve the specified/default HRESULT. No second error runtime is present.
+
+Existing STA/MTA cases verify all twelve overloads, Unicode/ACP inputs, long
+resources/text, native GetErrorInfo consumption/replacement and thread isolation.
+The real registered DLL reports an error from its own string resource through
+its existing GetValue method; the client retains that native IErrorInfo through
+server-object release, unregistration and actual DLL unload. Existing ordinary
+and cached tear-off IOuter TypeLib cases execute a failing real Invoke and check
+its native EXCEPINFO. These checks qualify this error-reporting subset, not all
+Automation exceptions or complete original Microsoft application compatibility.
+
+
+## Original COMMap class-source subset
+
+The existing STA ActiveX events case now builds the unchanged Outer/Chain and
+four nested aggreg class bodies from a byte-pinned Microsoft snapshot. Native
+process-local registration exercises all six logical OBJECT_ENTRY_AUTO classes
+without persistent class registration. Tests execute the eight original GetName routes,
+class factories, initial/partial FinalConstruct failure cleanup, specific/blind/
+automatic aggregation, chained canonical identity, ordinary/cached tear-offs,
+explicit native TypeLib Invoke and original rich errors. A cached interface
+retains the owner and module pins after factory revocation until final release.
+
+Repeated identical object entries from headers coalesce by type/CLSID/callback
+identity. Conflicting registrations remain invalid. No original methods/macros
+are transformed; no test target or mode is added. This does not admit the
+unchanged original VCXPROJ builds, original output/export layout or
+machine-wide DLL deployment. Original module/resource integration follows below. The original classes
+remain single-threaded and are used on the existing STA owner.
+
+
+The existing case also executes the six original RGS callbacks in an isolated
+HKCU root, selecting the existing EXE/DLL resource images for their overlapping
+IDs. It verifies actual paths, ProgIDs, threading values, duplicate-install
+rejection and reverse cleanup. Two embedded MIDL TypeLibs are explicitly
+registered per user through the public ATL helpers. Original registered-mode
+IDispatchImpl executes the eight IOuter routes plus IChain/four aggregate
+properties; independent unregister removes fresh lookup while retained native
+ITypeInfo remains invocable. Missing libraries never fall back to the embedded
+images. Original tear-off IIDs omitted by COMMap.tlb return
+TYPE_E_ELEMENTNOTFOUND while its library is registered. Tests reject preexisting
+sample keys and share the existing COM registration resource lock.
+
+
+## Original DLL module/resource integration
+
+Two existing unload DLLs additionally compile the unchanged COMMap.cpp and
+Aggreg.cpp module entry points, class bodies and original .rc resources.
+Their original private COM exports join the existing GUI exports. A test-only
+per-image initializer selects per-user registration metadata; COM and registry
+work occur only through the original exports after LoadLibrary returns.
+Existing GUI unload/no-COM checks and test entry points remain intact.
+
+After local source-subset factory retirement, the existing STA events case
+registers both DLLs, checks actual HKCU class/TypeLib paths, and performs native
+CoCreateInstance, direct/registered Invoke on all eight routes and five property
+interfaces. Interface vtable allocation bases must identify the correct DLL;
+each module rejects the other module's classes. Both unregister while a cached
+interface retains the owner/inners. All owned interfaces and COM caches retire
+before both images are verified unmapped. Original project builds, binary
+filename/export layout, machine-wide deployment and exact ATL layout remain open.
+
+
+## Poly objects on the existing factory engine
+
+CComPolyObject<T> and DECLARE_POLY_AGGREGATABLE add the standard single-wrapper
+policy to the existing automatic class creator path. m_contained delegates to
+the wrapper's private IUnknown for nonaggregated creation, or to the borrowed
+outer when aggregated. Private references and outer references stay independent.
+Raw creation returns zero references; owned creators retain a construction
+reference through QI and destroy all failed objects. Application and explicit
+COM module pins outlive the contained object's destructor.
+
+Existing core tests cover both modes, construction/exception failures,
+unsupported interfaces, exact ownership, concurrent references, factory
+retirement and tear-offs on poly owners. The existing Value DLL selects the
+poly macro and retains its actual STA/MTA native activation/aggregation,
+registration, error and unload coverage. No new engine, target, mode, workflow
+or custom export is added. Earlier milestone gaps for CComPolyObject are
+superseded by this subset; custom factories and exact ATL layout stay open.

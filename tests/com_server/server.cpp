@@ -27,6 +27,10 @@ using namespace OpenATL::COM;
     return false; } } while (0)
 
 bool RunAtlCompatibilityTests();
+bool RunDllConnectionPointTests(IOpenATLValue* object, IEnumConnections** retained);
+bool RunDllPropertyNotifyTests(IOpenATLValue* object);
+bool RunAtlAutoAggregateTests(bool multiThreaded);
+bool RunAtlErrorInfoTests();
 bool RunAtlDispatchTests();
 bool RunAtlModuleTests();
 int RunAtlModuleServer(const char* token, bool apartment);
@@ -34,6 +38,8 @@ bool RunRgsParserTests();
 bool RunRgsRegistryTests();
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
 bool RunOriginalCommapTypeLibTest(const char* path);
+bool RunDllTypeLibEventTests(IOpenATLValue* object);
+bool RunDllPersistEventTests(IOpenATLValue* object);
 #endif
 namespace {
 std::atomic<int> live{0};
@@ -367,7 +373,230 @@ public:
     ~Dll() { Close(); }
 };
 
+// Valid controlling outer in the client image; the DLL owns only the separate
+// nondelegating inner IUnknown. No AddRef of the outer is allowed just because
+// the inner was allocated or queried for its own IUnknown.
+class DllAggregateOuter final : public IUnknown {
+public:
+    std::atomic<ULONG> refs{1};
+    ATL::CComPtr<IUnknown> inner;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown)) {
+            *output = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return inner ? inner->QueryInterface(iid, output) : E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return --refs; }
+};
+bool aggregateDll(Dll& dll, bool nativeCom) {
+    DllAggregateOuter outer;
+    ATL::CComPtr<IClassFactory> factory;
+    REQUIRE(dll.get(CLSID_OpenATLValue, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK && factory.p);
+    void* invalid = reinterpret_cast<void*>(1);
+    REQUIRE(factory->CreateInstance(&outer, IID_OpenATLValue, &invalid) ==
+        CLASS_E_NOAGGREGATION && !invalid && outer.refs == 1);
+    REQUIRE(factory->CreateInstance(&outer, IID_IUnknown, nullptr) == E_POINTER);
+    HRESULT hr = nativeCom
+        ? ::CoCreateInstance(CLSID_OpenATLValue, &outer, CLSCTX_INPROC_SERVER,
+                             IID_IUnknown, reinterpret_cast<void**>(&outer.inner.p))
+        : factory->CreateInstance(&outer, IID_IUnknown,
+                                   reinterpret_cast<void**>(&outer.inner.p));
+    REQUIRE(hr == S_OK && outer.inner.p && outer.refs == 1);
+    factory.Release();
+    REQUIRE(dll.unload() == S_FALSE);
+    ATL::CComPtr<IUnknown> privateIdentity;
+    REQUIRE(outer.inner->QueryInterface(IID_IUnknown,
+        reinterpret_cast<void**>(&privateIdentity.p)) == S_OK &&
+        privateIdentity.p == outer.inner.p && privateIdentity.p != &outer && outer.refs == 1);
+    privateIdentity.Release();
+    ATL::CComPtr<IOpenATLValue> value;
+    REQUIRE(outer.QueryInterface(IID_OpenATLValue, reinterpret_cast<void**>(&value.p)) == S_OK && outer.refs == 2);
+    LONG result = 0;
+    REQUIRE(value->GetValue(&result) == S_OK && result == 42);
+    REQUIRE(RunDllConnectionPointTests(value.p, nullptr));
+    REQUIRE(RunDllPropertyNotifyTests(value.p));
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    REQUIRE(RunDllTypeLibEventTests(value.p));
+#endif
+    ATL::CComPtr<IOpenATLSecond> second;
+    REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && outer.refs == 3);
+    REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
+    ATL::CComPtr<IUnknown> canonical;
+    REQUIRE(second->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK &&
+        canonical.p == &outer && outer.refs == 4);
+    canonical.Release(); second.Release(); value.Release();
+    REQUIRE(outer.refs == 1);
+    outer.inner.Release();
+    // Exercise explicit DECLARE_NOT_AGGREGATABLE through the same auto-map
+    // engine, not just its direct local helper.
+    REQUIRE(dll.get(CLSID_OpenATLAuxValue, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK);
+    REQUIRE(factory->CreateInstance(&outer, IID_IUnknown, &invalid) == CLASS_E_NOAGGREGATION && !invalid);
+    factory.Release();
+    if (nativeCom) ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_OK && outer.refs == 1);
+    return true;
+}
+
+bool dllErrorInfoFields(IErrorInfo* error) {
+    GUID iid{};
+    DWORD help = 0;
+    ATL::CComBSTR text, file, source;
+    REQUIRE(error && error->GetGUID(&iid) == S_OK && IsEqualGUID(iid, IID_OpenATLValue));
+    REQUIRE(error->GetHelpContext(&help) == S_OK && help == 711);
+    REQUIRE(error->GetDescription(&text.m_str) == S_OK && text.m_str &&
+        std::wcscmp(text.m_str, L"OpenWTL resource error \u4e2d\u6587") == 0);
+    REQUIRE(error->GetHelpFile(&file.m_str) == S_OK && file.m_str &&
+        std::wcscmp(file.m_str, L"fixture-help.chm") == 0);
+    REQUIRE(error->GetSource(&source.m_str) == S_OK && source.m_str &&
+        std::wcscmp(source.m_str, OpenATLTestProgId) == 0);
+    return true;
+}
+bool captureDllError(IOpenATLValue* value, IErrorInfo** retained) {
+    ATL::CComPtr<ISupportErrorInfo> support;
+    REQUIRE(value->QueryInterface(IID_ISupportErrorInfo, reinterpret_cast<void**>(&support.p)) == S_OK);
+    REQUIRE(support->InterfaceSupportsErrorInfo(IID_OpenATLValue) == S_OK &&
+        support->InterfaceSupportsErrorInfo(IID_IStream) == S_FALSE);
+    support.Release();
+    REQUIRE(value->GetValue(nullptr) == E_POINTER);
+    REQUIRE(::GetErrorInfo(0, retained) == S_OK && *retained);
+    REQUIRE(dllErrorInfoFields(*retained));
+    return true;
+}
+
+class DllAutoAggregateOwner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IPersist {
+public:
+    ATL::CComPtr<IUnknown> inner;
+    void FinalRelease() noexcept { inner.Release(); }
+    BEGIN_COM_MAP(DllAutoAggregateOwner)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_OpenATLValue, inner.p, CLSID_OpenATLValue)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND(inner.p, CLSID_OpenATLValue)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = CLSID_NULL;
+        return S_OK;
+    }
+};
+bool autoAggregateDll(Dll& dll) {
+    ATL::CComObject<DllAutoAggregateOwner>* owner = nullptr;
+    REQUIRE(ATL::CComObject<DllAutoAggregateOwner>::CreateInstance(&owner) == S_OK && owner->AddRef() == 1);
+    ATL::CComPtr<IUnknown> identity;
+    REQUIRE(owner->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && !owner->inner.p);
+    identity.Release();
+    ATL::CComPtr<IOpenATLValue> value;
+    REQUIRE(owner->QueryInterface(IID_OpenATLValue, reinterpret_cast<void**>(&value.p)) == S_OK && owner->inner.p);
+    IUnknown* cached = owner->inner.p;
+    ATL::CComPtr<IOpenATLSecond> second;
+    REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && owner->inner.p == cached);
+    REQUIRE(second->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == owner->GetUnknown());
+    identity.Release();
+    void* missing = reinterpret_cast<void*>(1);
+    REQUIRE(owner->QueryInterface(IID_IStream, &missing) == E_NOINTERFACE && !missing && owner->inner.p == cached);
+    REQUIRE(owner->AddRef() == 4 && owner->Release() == 3);
+    LONG result = 0;
+    REQUIRE(value->GetValue(&result) == S_OK && result == 42);
+    REQUIRE(owner->Release() == 2);
+    ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_FALSE);
+    REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
+    second.Release(); value.Release();
+    ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_OK);
+    return true;
+}
+
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+// Original COMMap's library references IOuter/IChain, but not ITearOff1/2.
+// Preserve that omission: direct tear-off calls work and absent type info fails.
+template<class Face>
+bool tearOffProperty(Face* object, const wchar_t* text) {
+    ATL::CComBSTR value;
+    REQUIRE(object->get_Name(&value.m_str) == S_OK && value.m_str &&
+        std::wcscmp(value.m_str, text) == 0);
+    ATL::CComPtr<ITypeInfo> absent;
+    REQUIRE(object->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, &absent.p) == TYPE_E_ELEMENTNOTFOUND && !absent.p);
+    return true;
+}
+bool tearOffInvoke(IOuter* object, const wchar_t* text) {
+    ATL::CComPtr<ITypeInfo> info;
+    REQUIRE(object->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, &info.p) == S_OK && info.p);
+    TYPEATTR* attr = nullptr;
+    REQUIRE(info->GetTypeAttr(&attr) == S_OK && attr);
+    const bool identity = IsEqualIID(attr->guid, IID_IOuter);
+    info->ReleaseTypeAttr(attr);
+    REQUIRE(identity);
+    LPOLESTR names[] = {const_cast<LPOLESTR>(L"GetName")};
+    DISPID member = DISPID_UNKNOWN;
+    REQUIRE(object->GetIDsOfNames(IID_NULL, names, 1, LOCALE_SYSTEM_DEFAULT, &member) == S_OK && member != DISPID_UNKNOWN);
+    VARIANTARG number{};
+    number.vt = VT_I2; number.iVal = 7;
+    DISPPARAMS arguments{&number, nullptr, 1, 0};
+    ATL::CComVariant value;
+    REQUIRE(object->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+        &arguments, &value, nullptr, nullptr) == S_OK);
+    REQUIRE(value.vt == VT_BSTR && value.bstrVal && std::wcscmp(value.bstrVal, text) == 0);
+    ATL::CComPtr<ISupportErrorInfo> support;
+    REQUIRE(object->QueryInterface(IID_ISupportErrorInfo, reinterpret_cast<void**>(&support.p)) == S_OK);
+    REQUIRE(support->InterfaceSupportsErrorInfo(IID_IOuter) == S_OK &&
+        support->InterfaceSupportsErrorInfo(IID_IChain) == S_FALSE);
+    support.Release();
+    number.iVal = 8;
+    EXCEPINFO exception{};
+    ATL::CComVariant failedValue;
+    const HRESULT failure = object->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+        &arguments, &failedValue, &exception, nullptr);
+    ATL::CComBSTR errorDescription, errorSource, errorHelp;
+    errorDescription.Attach(exception.bstrDescription);
+    errorSource.Attach(exception.bstrSource);
+    errorHelp.Attach(exception.bstrHelpFile);
+    REQUIRE(failure == DISP_E_EXCEPTION && exception.scode == E_INVALIDARG && exception.dwHelpContext == 712);
+    REQUIRE(errorDescription.m_str && std::wcscmp(errorDescription.m_str, L"Expected number seven") == 0);
+    REQUIRE(errorHelp.m_str && std::wcscmp(errorHelp.m_str, L"tear-help.chm") == 0);
+    ::SetErrorInfo(0, nullptr);
+    return true;
+}
+bool verifyTearOffDispatch(IDispatch* owner, IOuter** retained) {
+    REQUIRE(retained);
+    *retained = nullptr;
+    ATL::CComPtr<ITearOff1> first, another, same;
+    ATL::CComPtr<ITearOff2> cached, repeated, cross;
+    REQUIRE(owner->QueryInterface(IID_ITearOff1, reinterpret_cast<void**>(&first.p)) == S_OK);
+    REQUIRE(owner->QueryInterface(IID_ITearOff1, reinterpret_cast<void**>(&another.p)) == S_OK && first.p != another.p);
+    REQUIRE(first->QueryInterface(IID_ITearOff1, reinterpret_cast<void**>(&same.p)) == S_OK && first.p == same.p);
+    REQUIRE(owner->QueryInterface(IID_ITearOff2, reinterpret_cast<void**>(&cached.p)) == S_OK);
+    REQUIRE(owner->QueryInterface(IID_ITearOff2, reinterpret_cast<void**>(&repeated.p)) == S_OK && cached.p == repeated.p);
+    REQUIRE(first->QueryInterface(IID_ITearOff2, reinterpret_cast<void**>(&cross.p)) == S_OK && cross.p == cached.p);
+    ATL::CComPtr<IUnknown> canonical;
+    REQUIRE(owner->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK);
+    for (IUnknown* item : {static_cast<IUnknown*>(first.p), static_cast<IUnknown*>(another.p),
+                           static_cast<IUnknown*>(cached.p), static_cast<IUnknown*>(repeated.p)}) {
+        ATL::CComPtr<IUnknown> identity;
+        REQUIRE(item->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == canonical.p);
+    }
+    REQUIRE(tearOffProperty(first.p, L"OpenWTL tear one"));
+    REQUIRE(tearOffProperty(cached.p, L"OpenWTL tear two"));
+    ATL::CComPtr<IOuter> ordinaryDispatch, cachedDispatch, repeatedDispatch;
+    REQUIRE(first->QueryInterface(IID_IOuter, reinterpret_cast<void**>(&ordinaryDispatch.p)) == S_OK);
+    REQUIRE(cached->QueryInterface(IID_IOuter, reinterpret_cast<void**>(&cachedDispatch.p)) == S_OK);
+    REQUIRE(owner->QueryInterface(IID_IOuter, reinterpret_cast<void**>(&repeatedDispatch.p)) == S_OK &&
+        repeatedDispatch.p == cachedDispatch.p && ordinaryDispatch.p != cachedDispatch.p);
+    for (IOuter* item : {ordinaryDispatch.p, cachedDispatch.p}) {
+        ATL::CComPtr<IUnknown> identity;
+        REQUIRE(item->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == canonical.p);
+    }
+    REQUIRE(tearOffInvoke(ordinaryDispatch.p, L"OpenWTL tear one"));
+    REQUIRE(tearOffInvoke(cachedDispatch.p, L"OpenWTL tear two"));
+    *retained = cachedDispatch.Detach();
+    return true;
+}
 bool embeddedDispatch(Dll& dll, const char* creator = "OpenATLCreateEmbeddedDispatch") {
     using Create = HRESULT (WINAPI*)(IDispatch**);
     using TypeInfo = HRESULT (WINAPI*)(REFIID, REFGUID, ITypeInfo**);
@@ -415,9 +644,14 @@ bool embeddedDispatch(Dll& dll, const char* creator = "OpenATLCreateEmbeddedDisp
     ATL::CComPtr<ITypeLib> registeredAfter;
     REQUIRE(::LoadRegTypeLib(LIBID_COMMAPLib, 1, 0, LOCALE_SYSTEM_DEFAULT,
         &registeredAfter.p) == registryBefore);
+    ATL::CComPtr<IOuter> retainedTear;
+    REQUIRE(verifyTearOffDispatch(dispatch.p, &retainedTear.p));
     dispatch.Release();
     info.Release();
     library.Release();
+    REQUIRE(dll.unload() == S_FALSE);
+    REQUIRE(tearOffInvoke(retainedTear.p, L"OpenWTL tear two"));
+    retainedTear.Release();
     REQUIRE(dll.unload() == S_OK);
     std::puts("OPENATL_EMBEDDED_TYPELIB_OK image=dll dispatch=1 invoke=1 register=0");
     return true;
@@ -561,6 +795,9 @@ bool exeDispatch(bool registered) {
                             &parameters, &result, nullptr, nullptr) == S_OK);
     REQUIRE(result.vt == VT_BSTR && result.bstrVal &&
             std::wstring_view(result.bstrVal, ::SysStringLen(result.bstrVal)) == L"OpenWTL embedded chain");
+    ATL::CComPtr<IOuter> retainedTear;
+    REQUIRE(verifyTearOffDispatch(dispatch.p, &retainedTear.p));
+    REQUIRE(tearOffInvoke(retainedTear.p, L"OpenWTL tear two"));
     return true;
 }
 
@@ -1431,6 +1668,8 @@ bool native(DWORD apartment) {
     ULONG_PTR token = 0;
     REQUIRE(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     REQUIRE(dll.unload() == S_OK);
+    REQUIRE(aggregateDll(dll, false));
+    REQUIRE(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
     // Direct factory use is independent of COM initialization.
     ATL::CComPtr<IClassFactory> factory;
     REQUIRE(dll.get(CLSID_OpenATLValue, IID_IClassFactory,
@@ -1467,6 +1706,36 @@ bool native(DWORD apartment) {
     HRESULT initialized = ::CoInitializeEx(nullptr, apartment);
     REQUIRE(initialized == S_OK);
     struct ApartmentOwner { ~ApartmentOwner() { ::CoUninitialize(); } } owner;
+    REQUIRE(aggregateDll(dll, true));
+    REQUIRE(RunAtlAutoAggregateTests(apartment == COINIT_MULTITHREADED));
+    REQUIRE(RunAtlErrorInfoTests());
+    REQUIRE(autoAggregateDll(dll));
+    {
+        ATL::CComPtr<IOpenATLValue> eventObject;
+        REQUIRE(::CoCreateInstance(CLSID_OpenATLValue, nullptr, CLSCTX_INPROC_SERVER,
+            IID_OpenATLValue, reinterpret_cast<void**>(&eventObject.p)) == S_OK);
+        ATL::CComPtr<IEnumConnections> snapshot, clone;
+        REQUIRE(RunDllConnectionPointTests(eventObject.p, &snapshot.p));
+        REQUIRE(RunDllPropertyNotifyTests(eventObject.p));
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        REQUIRE(RunDllTypeLibEventTests(eventObject.p));
+#endif
+        REQUIRE(snapshot->Clone(&clone.p) == S_OK);
+        eventObject.Release();
+        ::CoFreeUnusedLibrariesEx(0, 0);
+        REQUIRE(dll.unload() == S_FALSE); // Only the enumeration owns the source.
+        CONNECTDATA data{};
+        REQUIRE(snapshot->Next(1, &data, nullptr) == S_OK && data.pUnk && data.dwCookie);
+        ATL::CComPtr<IUnknown> held; held.Attach(data.pUnk);
+        ATL::CComPtr<IOpenATLValueEvents> sink;
+        REQUIRE(held->QueryInterface(IID_OpenATLValueEvents, reinterpret_cast<void**>(&sink.p)) == S_OK);
+        REQUIRE(sink->OnValue(42) == S_OK);
+        sink.Release(); held.Release(); snapshot.Release();
+        REQUIRE(dll.unload() == S_FALSE); // Clone retains the same snapshot.
+        clone.Release();
+        ::CoFreeUnusedLibrariesEx(0, 0);
+        REQUIRE(dll.unload() == S_OK);
+    }
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
     REQUIRE(embeddedDispatch(dll));
     REQUIRE(embeddedDispatch(dll, "OpenATLCreateRegisteredDispatch"));
@@ -1486,10 +1755,15 @@ bool native(DWORD apartment) {
                                 IID_OpenATLValue, reinterpret_cast<void**>(&object)) == S_OK);
     LONG value = 0;
     REQUIRE(object->GetValue(&value) == S_OK && value == 42 && identities(object));
+    ATL::CComPtr<IErrorInfo> retainedError;
+    REQUIRE(captureDllError(object.p, &retainedError.p));
     ATL::CComPtr<IOpenATLValue> secondObject;
     REQUIRE(::CoCreateInstance(CLSID_OpenATLAuxValue, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_OpenATLValue, reinterpret_cast<void**>(&secondObject)) == S_OK);
     REQUIRE(secondObject->GetValue(&value) == S_OK && value == 84);
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    REQUIRE(RunDllPersistEventTests(secondObject.p));
+#endif
     REQUIRE(dll.unload() == S_FALSE);
     object.Release();
     secondObject.Release();
@@ -1509,6 +1783,8 @@ bool native(DWORD apartment) {
                                 IID_OpenATLValue, &missing) == REGDB_E_CLASSNOTREG && !missing);
     REQUIRE(dll.Close());
     REQUIRE(::GetModuleHandleW(L"openatl_com_server_fixture.dll") == nullptr);
+    REQUIRE(dllErrorInfoFields(retainedError.p));
+    retainedError.Release();
     return true;
 }
 } // namespace

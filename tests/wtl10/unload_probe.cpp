@@ -1,6 +1,7 @@
 // OpenATL test-only Windows DLL: thunk callback owner and bounded unload.
 // The DLL is never freed while a GUI window, class or callback owns its code.
-// No COM, class registration service, RGS, installed SDK or production API.
+// This GUI path never initializes COM or registers a COM class. On native
+// Windows the same DLL also contains the unchanged original Aggreg module.
 #include <windows.h>
 #include <atomic>
 #include <atlwin.h>

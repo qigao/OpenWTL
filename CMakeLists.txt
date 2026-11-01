@@ -216,7 +216,15 @@ if(OPENATL_BUILD_QUALIFICATION)
 
   # Real test DLL, not a substitute for production plugin lifetime rules.
   # The host uses LoadLibrary/GetProcAddress, never a static import.
-  add_library(openatl_unload_fixture SHARED tests/wtl10/unload_fixture.cpp tests/wtl10/unload_fixture.def)
+  set(_unload_fixture_exports "${CMAKE_CURRENT_SOURCE_DIR}/tests/wtl10/unload_fixture.def")
+  set(_unload_probe_exports "${CMAKE_CURRENT_SOURCE_DIR}/tests/wtl10/unload_probe.def")
+  if(CMAKE_HOST_WIN32)
+    # Existing DLLs also host the original Microsoft modules. The COM server
+    # subdirectory preserves these exports and appends the original COM names.
+    set(_unload_fixture_exports "${CMAKE_CURRENT_BINARY_DIR}/tests/com_server/original_commap_exports.def")
+    set(_unload_probe_exports "${CMAKE_CURRENT_BINARY_DIR}/tests/com_server/original_aggreg_exports.def")
+  endif()
+  add_library(openatl_unload_fixture SHARED tests/wtl10/unload_fixture.cpp "${_unload_fixture_exports}")
   target_link_libraries(openatl_unload_fixture PRIVATE OpenWTL::WTL user32)
   set_target_properties(openatl_unload_fixture PROPERTIES
     PREFIX "" OUTPUT_NAME "openatl_unload_fixture")
@@ -228,7 +236,7 @@ if(OPENATL_BUILD_QUALIFICATION)
 
   # Independent blocked-callback probe from PR #9, alongside the queued-work
   # and caller-lease unload fixture above.
-  add_library(openatl_unload_probe SHARED tests/wtl10/unload_probe.cpp tests/wtl10/unload_probe.def)
+  add_library(openatl_unload_probe SHARED tests/wtl10/unload_probe.cpp "${_unload_probe_exports}")
   set_target_properties(openatl_unload_probe PROPERTIES PREFIX "")
   target_link_libraries(openatl_unload_probe PRIVATE OpenWTL::WTL user32)
   add_executable(openatl_unload_native tests/wtl10/unload_native.cpp)

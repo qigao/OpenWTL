@@ -548,21 +548,34 @@ struct AutoRegistryMethod<Class,
 };
 
 struct AutoObjectEntry;
+template<class T> struct AutoObjectType { inline static char identity = 0; };
 inline std::atomic<AutoObjectEntry*> autoObjectEntries{nullptr};
 struct AutoObjectEntry {
     const CLSID clsid;
     const OpenATL::COM::Creator creator;
+    const OpenATL::COM::AggregatedCreator creatorWithOuter;
     const AutoRegistryCallback registrar;
+    const void* const typeIdentity;
     AutoObjectEntry* next = nullptr;
 
     AutoObjectEntry(REFCLSID id, OpenATL::COM::Creator function,
-                    AutoRegistryCallback registry = nullptr) noexcept
-        : clsid(id), creator(function), registrar(registry) {
-        AutoObjectEntry* head = autoObjectEntries.load(std::memory_order_relaxed);
-        do {
+                    AutoRegistryCallback registry = nullptr,
+                    OpenATL::COM::AggregatedCreator aggregate = nullptr,
+                    const void* type = nullptr) noexcept
+        : clsid(id), creator(function), creatorWithOuter(aggregate), registrar(registry), typeIdentity(type) {
+        AutoObjectEntry* head = autoObjectEntries.load(std::memory_order_acquire);
+        for (;;) {
+            // A header may declare the same OBJECT_ENTRY_AUTO in multiple
+            // translation units. Coalesce only the same type and metadata;
+            // conflicting CLSIDs/types still reach Initialize's validation.
+            if (type) for (const auto* item = head; item; item = item->next)
+                if (item->typeIdentity == type && IsEqualCLSID(item->clsid, id) &&
+                    item->creator == function && item->creatorWithOuter == aggregate &&
+                    item->registrar == registry) return;
             next = head;
-        } while (!autoObjectEntries.compare_exchange_weak(
-            head, this, std::memory_order_release, std::memory_order_relaxed));
+            if (autoObjectEntries.compare_exchange_weak(
+                    head, this, std::memory_order_acq_rel, std::memory_order_acquire)) return;
+        }
     }
     AutoObjectEntry(const AutoObjectEntry&) = delete;
     AutoObjectEntry& operator=(const AutoObjectEntry&) = delete;
@@ -638,7 +651,8 @@ public:
                     for (const detail::AutoObjectEntry* entry =
                              detail::autoObjectEntries.load(std::memory_order_acquire);
                          entry; entry = entry->next) {
-                        if (IsEqualCLSID(entry->clsid, CLSID_NULL) || !entry->creator) {
+                        if (IsEqualCLSID(entry->clsid, CLSID_NULL) ||
+                            (bool(entry->creator) == bool(entry->creatorWithOuter))) {
                             autoStatus_ = E_INVALIDARG;
                             return;
                         }
@@ -663,7 +677,8 @@ public:
                             return BeforeClsid(a->clsid, b->clsid);
                         });
                     for (const auto* entry : entries) {
-                        autoEntries_.push_back({entry->clsid, entry->creator});
+                        autoEntries_.push_back({entry->clsid, entry->creator,
+                                                entry->creatorWithOuter});
                         autoRegistrars_.push_back({entry->clsid, entry->registrar});
                     }
                     autoOwned_.reset(new (std::nothrow)

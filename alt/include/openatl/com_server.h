@@ -15,9 +15,11 @@ namespace OpenATL { namespace COM {
 
 class Module;
 using Creator = HRESULT (*)(Module&, REFIID, void**) noexcept;
+using AggregatedCreator = HRESULT (*)(Module&, IUnknown*, REFIID, void**) noexcept;
 struct ClassEntry {
     CLSID clsid;
-    Creator create;
+    Creator create = nullptr;
+    AggregatedCreator createWithOuter = nullptr;
 };
 
 namespace detail {
@@ -46,7 +48,8 @@ public:
         : entries_(entries), count_(count) {
         if (count != 0 && entries == nullptr) { status_ = E_INVALIDARG; return; }
         for (size_t i = 0; i < count; ++i) {
-            if (!entries[i].create || IsEqualCLSID(entries[i].clsid, CLSID_NULL)) {
+            if ((bool(entries[i].create) == bool(entries[i].createWithOuter)) ||
+                IsEqualCLSID(entries[i].clsid, CLSID_NULL)) {
                 status_ = E_INVALIDARG; return;
             }
             for (size_t j = 0; j < i; ++j)
@@ -200,8 +203,8 @@ private:
 namespace detail {
 class ClassFactory final : public IClassFactory {
 public:
-    ClassFactory(Module& module, Creator create) noexcept
-        : module_(module), reference_(module), create_(create) {}
+    ClassFactory(Module& module, const ClassEntry& entry) noexcept
+        : module_(module), reference_(module), entry_(entry) {}
     HRESULT Status() const noexcept { return reference_.Status(); }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) noexcept override {
         if (!output) return E_POINTER;
@@ -225,8 +228,11 @@ public:
                                              void** output) noexcept override {
         if (!output) return E_POINTER;
         *output = nullptr;
-        if (outer) return CLASS_E_NOAGGREGATION;
-        const HRESULT hr = create_(module_, iid, output);
+        if (outer && (!entry_.createWithOuter || !IsEqualIID(iid, IID_IUnknown)))
+            return CLASS_E_NOAGGREGATION;
+        const HRESULT hr = entry_.createWithOuter
+            ? entry_.createWithOuter(module_, outer, iid, output)
+            : entry_.create(module_, iid, output);
         return SUCCEEDED(hr) && !*output ? E_UNEXPECTED : hr;
     }
     HRESULT STDMETHODCALLTYPE LockServer(BOOL lock) noexcept override {
@@ -235,7 +241,7 @@ public:
 private:
     Module& module_;
     ModuleReference reference_;
-    Creator create_;
+    const ClassEntry entry_;
     std::atomic<ULONG> references_{1};
 };
 } // namespace detail
@@ -247,7 +253,7 @@ inline HRESULT Module::GetClassObject(REFCLSID clsid, REFIID iid,
     if (FAILED(status_)) return status_;
     for (size_t i = 0; i < count_; ++i) {
         if (!IsEqualCLSID(clsid, entries_[i].clsid)) continue;
-        auto* factory = new (std::nothrow) detail::ClassFactory(*this, entries_[i].create);
+        auto* factory = new (std::nothrow) detail::ClassFactory(*this, entries_[i]);
         if (!factory) return E_OUTOFMEMORY;
         HRESULT hr = factory->Status();
         if (SUCCEEDED(hr)) hr = factory->QueryInterface(iid, output);

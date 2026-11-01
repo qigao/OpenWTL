@@ -1,1 +1,8 @@
-*.idl -text
+*.idl -text -whitespace
+*.rgs -text -whitespace
+*.cpp -text -whitespace
+*.h -text -whitespace
+commap_classes_native.cpp whitespace=blank-at-eol,blank-at-eof,space-before-tab
+*.rc -text -whitespace
+*.def -text -whitespace
+dll_per_user.cpp whitespace=blank-at-eol,blank-at-eof,space-before-tab

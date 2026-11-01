@@ -504,3 +504,41 @@ full arbitrary RGS registration grammar, complete legacy TypeLib APIs,
 aggregated classes and complete EXE/service COM Server behavior remain
 separate compatibility milestones. Bounded real `REGISTRY` resource-ID
 handling is now available only under an explicit scoped registration policy. Complete Microsoft ATL source compatibility is not yet claimed.
+
+## Automatic factory aggregation policy
+
+OBJECT_ENTRY_AUTO now supplies the built-in class creator policy to the same
+Module engine, including an explicit controlling-outer parameter. CComCoClass
+provides the default aggregatable policy; NOT_AGGREGATABLE and
+ONLY_AGGREGATABLE declarations select their respective creation paths. Classes
+without CComCoClass or a declared policy retain nonaggregated CComObject
+creation. Existing explicit Creator callbacks keep their nonaggregated contract.
+
+Factories validate the aggregate IID_IUnknown request before calling a creator.
+CComAggObject binds the module before FinalConstruct, keeps the outer pointer
+borrowed, and separates nondelegating inner lifetime from interface references
+that retain the outer. The object pins the engine and application module until
+the contained Base destructor finishes, even after the factory is released.
+See COM_SERVER.md for aggregate map ownership and the qualified native tests.
+
+
+## Original Microsoft two-DLL integration
+
+The existing unload fixture/probe images now also compile byte-pinned original
+COMMap.cpp/Aggreg.cpp module entry points and their respective original .rc
+resources/class sources. The original four private COM exports join the GUI
+exports. Existing GUI cases still verify no implicit COM initialization.
+The STA events case calls original per-user register/unregister exports,
+native CoCreateInstance and registered dispatch, checks vtable image ownership,
+retains a cached owner across unregister, and verifies actual DLL unmapping
+once objects and COM caches retire. No target, test mode or workflow is added.
+This qualifies the original module path in existing images; untouched VCXPROJ
+builds, original output/export layouts and machine-wide policies remain open.
+
+
+Automatic OBJECT_ENTRY_AUTO creation also honors DECLARE_POLY_AGGREGATABLE.
+Both aggregated and nonaggregated requests select CComPolyObject on the same
+factory engine. Its private IUnknown and contained public interfaces share the
+existing application/COM module pin contract. The registered Value DLL now
+uses this policy in the existing native STA/MTA activation and unload cases.
+Custom factory policies and exact ATL binary layouts remain unqualified.
