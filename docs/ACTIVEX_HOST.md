@@ -69,11 +69,13 @@ Standard/extended resources may also name a literal CLSID as a control class:
 validated empty placeholders are converted into the existing AxWin host with
 the CLSID as its creation text. Ordinary controls and original resource bytes
 are preserved. Bounded DLGINIT 0x0376 records supply counted license keys and
-persisted bytes to the existing native factory/stream initialization. Loading
-finishes before application WM_INITDIALOG and automatic sink subscriptions;
+persisted bytes to the existing native factory/stream initialization. Empty
+0x0378 INITNEW records use a null stream and the existing InitNew path; even an
+empty 0x0376 stream still calls Load. Nonempty INITNEW payloads remain unsupported.
+Initialization finishes before application WM_INITDIALOG and automatic sink subscriptions;
 failed or reentrant retirement destroys the partial dialog. Storage, binding,
-INITNEW, ordinary list/combo messages and nonempty inline placeholder data still
-fail explicitly. This path creates all native children before loading controls
+ordinary list/combo messages and nonempty inline placeholder data still
+fail explicitly. This path creates all native children before initializing controls
 and does not forward early application dialog callbacks. See
 [control-dialog scope](ATL_COMPATIBILITY.md#control-hosting-dialogs).
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for

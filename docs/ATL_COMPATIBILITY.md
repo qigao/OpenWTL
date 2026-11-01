@@ -603,7 +603,7 @@ DialogBoxIndirectParamW; unchanged resources retain their original native path.
 
 Malformed/truncated templates and malformed brace-prefixed CLSID classes fail
 ERROR_INVALID_DATA. Nonempty placeholder titles or inline ActiveX creation data,
-DLGINIT records other than stream loading and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
+Unsupported DLGINIT records and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
 Unknown ordinary native child classes fail through Windows.
 Unimplemented resource initialization is not silently skipped. Storage and data
 binding persistence, full control-splitting/property pages, advanced OLE
@@ -618,24 +618,34 @@ zero padding bytes are accepted. The license is a counted BSTR, including any
 embedded zero characters. An absent key uses normal factory creation. Duplicate
 records, missing/non-host control IDs, duplicate matching dialog IDs, truncated
 headers/payloads/keys and nonzero trailing data fail ERROR_INVALID_DATA before
-any window is created. Storage, INITNEW, data-binding extension and ordinary
+any window is created. Storage, data-binding extension and ordinary
 list/combo initialization messages currently fail ERROR_NOT_SUPPORTED.
 
-For records with persisted data, conversion creates an empty AxWin child. A
-private dialog procedure loads the matching controls in dialog order before
+Empty DLGINIT INITNEW records (message 0x0378, payload length zero) select the
+existing host's default initialization path with a null IStream. They call
+IPersistStreamInit::InitNew instead of Load; a control without that interface
+uses the existing creation path without a persistence initialization call. Nonempty 0x0378 payloads are
+recognized but fail ERROR_NOT_SUPPORTED before window creation. License-bearing
+INITNEW variants are not admitted. In contrast, 0x0376 with a zero license count
+and no persisted bytes still supplies a real empty stream and calls Load. It is
+never silently changed to InitNew. Mixed stream/INITNEW records use the same ID
+validation, dialog ordering, transaction and cleanup rules.
+
+For supported initialization records, conversion creates an empty AxWin child. A
+private dialog procedure initializes the matching controls in dialog order before
 forwarding WM_INITDIALOG with the caller's original parameter. It uses a native
 IStream positioned at the first persisted byte, then the existing host's
 IPersistStreamInit::Load (or IPersistStream fallback) and licensed factory path.
 It does not call InitNew before Load. Initialization failure destroys the native
 dialog and every partial host, skips the application initializer and reports
-failure. Loading that destroys a host or dialog is also a failed creation.
+failure. Initialization that destroys a host or dialog is also a failed creation.
 Successful initialization hands the native dialog procedure slot to the caller;
 CAxDialogImpl then binds its usual thunk and sink map. There is no dialog-context
 registry or retained pointer into a temporary resource. This path deliberately
 initializes after all native children exist; it does not claim ATL's exact
 WM_CREATE callback sequence or inline creation-data format. Early application
 dialog callbacks before WM_INITDIALOG are not forwarded on this path. Resources
-without stream records retain the existing creation path.
+without initialization records retain the existing creation path.
 
 Existing ActiveX cases embed own standard/extended and named dialog resources.
 Plain dialogs verify modal/modeless parameters, reuse, failure/close retry,
@@ -654,7 +664,8 @@ both modal/modeless paths and cleanup after a later converted control fails.
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
-Native persistence: [IPersistStreamInit::Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-load),
+Native persistence: [IPersistStreamInit::InitNew](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-initnew),
+[IPersistStreamInit::Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-load),
 [IClassFactory2::CreateInstanceLic](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iclassfactory2-createinstancelic).
 A Microsoft-published [resource example](https://download.microsoft.com/download/1/6/d/16d24ada-5317-4de1-b2b2-890b51813d6e/VS2005_DeviceDev_en-us.pdf)
 contains a 0x0376 record; it is format evidence, not a newly admitted application.
@@ -671,3 +682,18 @@ cleanup, owner reuse, failed license/load, rollback after a later control fails,
 and reentrant host/dialog destruction. The existing pre-OLE resource checks cover
 bounds, malformed records, ID matching, dialog-order loading and empty DLGINIT
 without creating an apartment. No original application admission is inferred.
+
+The same lifecycle case also exercises empty INITNEW records in standard and
+extended compiled resources, mixed INITNEW/stream records in reversed resource
+order, both client-site orders, controls without IPersistStreamInit, modal and
+modeless creation, recursive WM_INITDIALOG, InitNew failure, later-control
+failure, reentrant child/dialog retirement, close during initialization and owner
+reuse. A distinct empty-stream fixture must fail Load without calling InitNew.
+Pre-OLE checks cover truncated zero-payload records, duplicate/missing/non-host
+IDs and nonempty INITNEW payload rejection. No new test mode or executable is
+introduced; complete resource-editor or original-application admission is not
+inferred from these own fixtures.
+The existing WebBrowser case additionally creates an INITNEW resource dialog in
+both modal and modeless paths and verifies native navigation, TypeLib events,
+automatic sink subscription, retained resource styles/help IDs and teardown.
+The executable, modes and original 25-second budget remain unchanged.

@@ -16,6 +16,7 @@ struct ControlState {
     bool siteOrder = true, licenseSeen = false;
     bool discoverWindow = false, destroyDialogDuringInit = false, sendInitDuringLoad = false;
     ULONG streamBytes = 4;
+    int failInitializationAt = 0;
     HWND window = nullptr;
     int initialized = 0, loaded = 0, activated = 0, detached = 0, closed = 0, destroyed = 0;
 };
@@ -97,7 +98,8 @@ private:
         if (state_.destroyDuringInit) ::DestroyWindow(state_.window);
         if (state_.destroyDialogDuringInit) ::DestroyWindow(::GetParent(state_.window));
         if (state_.sendInitDuringLoad) ::SendMessageW(::GetParent(state_.window), WM_INITDIALOG, 0, 0);
-        return state_.failInit || !state_.siteOrder ? E_FAIL : S_OK;
+        return state_.failInit || !state_.siteOrder || (state_.failInitializationAt &&
+            state_.initialized + state_.loaded == state_.failInitializationAt) ? E_FAIL : S_OK;
     }
     ~Control() { ++state_.destroyed; }
     ULONG refs_ = 1;
@@ -190,16 +192,17 @@ public:
     ControlState& state;
     bool modal = false, closeInInit = false, good = true;
     int initialized = 0, finalized = 0;
+    int expectedNew = 0, expectedLoads = 1, expectedActivations = 1;
     explicit ResourceDialog(ControlState& value) : state(value) {}
     int GetIDD() const { return resource; }
     LRESULT Init(UINT, WPARAM, LPARAM parameter, BOOL&) {
         ++initialized;
         ATL::CComPtr<IOleObject> control;
-        good = parameter == 1773 && state.loaded == 1 && state.initialized == 0 && state.activated == 1 &&
+        good = parameter == 1773 && state.loaded == expectedLoads && state.initialized == expectedNew && state.activated == expectedActivations &&
             GetDlgControl(711, IID_IOleObject, reinterpret_cast<void**>(&control)) == S_OK && ::GetDlgItem(m_hWnd, 714);
         WCHAR hostClass[32]{};
         good = ::GetClassNameW(::GetDlgItem(m_hWnd, 711), hostClass, 32) &&
-            !::wcscmp(hostClass, resource == 611 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
+            !::wcscmp(hostClass, resource == 611 || resource == 621 ? L"AtlAxWinLic140" : L"AtlAxWin140") && good;
         if (modal) good = EndDialog(93) && good;
         else if (closeInInit) good = DestroyWindow() && good;
         return TRUE;
@@ -217,22 +220,28 @@ bool resourceInitialization() {
     Registration registration;
     REQUIRE(::CoRegisterClassObject(classId, factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
     ATL::CAtlModule module;
-    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619)}) for (int mode = 0; mode < 5; ++mode) {
+    for (WORD resource : {WORD(610), WORD(611), WORD(612), WORD(619), WORD(620), WORD(621), WORD(622)}) for (int mode = 0; mode < 5; ++mode) {
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         state.siteFirst = mode != 1; state.initInterface = mode != 2;
         state.sendInitDuringLoad = mode == 4;
         state.streamBytes = resource == 619 ? 5 : 4;
         ResourceDialog dialog(state); dialog.resource = resource; dialog.modal = mode == 3;
+        if (resource >= 620) {
+            dialog.expectedNew = state.initInterface ? 1 : 0;
+            dialog.expectedLoads = resource == 622 ? 1 : 0;
+            dialog.expectedActivations = resource == 622 ? 2 : 1;
+        }
         if (dialog.modal) REQUIRE(dialog.DoModal(nullptr, 1773) == 93);
         else {
             REQUIRE(dialog.Create(nullptr, 1773));
-            REQUIRE(module.GetLockCount() == 1);
+            REQUIRE(module.GetLockCount() == dialog.expectedActivations);
             REQUIRE(dialog.DestroyWindow());
         }
         REQUIRE(dialog.good && dialog.initialized == 1 && dialog.finalized == 1 && !dialog.m_hWnd);
-        REQUIRE(state.siteOrder && state.loaded == 1 && !state.initialized && state.activated == 1);
+        REQUIRE(state.siteOrder && state.loaded == dialog.expectedLoads && state.initialized == dialog.expectedNew && state.activated == dialog.expectedActivations);
         REQUIRE(state.licenseSeen == (resource == 612 || resource == 619));
-        REQUIRE(state.detached == 1 && state.closed == 1 && state.destroyed == 1 && module.GetLockCount() == 0);
+        REQUIRE(state.detached == dialog.expectedActivations && state.closed == dialog.expectedActivations &&
+            state.destroyed == dialog.expectedActivations && module.GetLockCount() == 0);
     }
     // Failure must finish before application initialization, clean all earlier
     // children and leave the C++ owner reusable without pending creation data.
@@ -256,6 +265,29 @@ bool resourceInitialization() {
         REQUIRE(state.destroyed == (mode == 0 ? 0 : mode == 1 ? 2 : 1));
         state = ControlState{}; state.classId = classId; state.discoverWindow = true;
         dialog.resource = 610; dialog.modal = false; dialog.closeInInit = false;
+        REQUIRE(dialog.Create(nullptr, 1773) && dialog.good);
+        REQUIRE(dialog.DestroyWindow() && module.GetLockCount() == 0);
+    }
+    for (int mode = 0; mode < 6; ++mode) for (bool modal : {false, true}) {
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        state.failInit = mode == 0;
+        state.destroyDuringInit = mode == 1;
+        state.destroyDialogDuringInit = mode == 2;
+        state.failInitializationAt = mode == 3 ? 2 : 0;
+        ResourceDialog dialog(state); dialog.modal = modal;
+        dialog.resource = mode == 3 ? 627 : mode == 5 ? 625 : 620;
+        dialog.expectedNew = 1; dialog.expectedLoads = 0;
+        dialog.closeInInit = mode == 4;
+        if (mode == 4 && modal) REQUIRE(dialog.DoModal(nullptr, 1773) == 93);
+        else if (modal) REQUIRE(dialog.DoModal(nullptr, 1773) == -1);
+        else REQUIRE(!dialog.Create(nullptr, 1773));
+        REQUIRE(!dialog.m_hWnd && module.GetLockCount() == 0);
+        REQUIRE(dialog.initialized == (mode == 4 ? 1 : 0) && dialog.finalized == (mode == 4 ? 1 : 0));
+        REQUIRE(state.initialized == (mode == 3 ? 2 : mode == 5 ? 0 : 1) && state.loaded == 0);
+        REQUIRE(state.activated == (mode == 3 || mode == 4 ? 1 : 0));
+        REQUIRE(state.destroyed == (mode == 3 ? 2 : 1));
+        state = ControlState{}; state.classId = classId; state.discoverWindow = true;
+        dialog.resource = 620; dialog.modal = false; dialog.closeInInit = false;
         REQUIRE(dialog.Create(nullptr, 1773) && dialog.good);
         REQUIRE(dialog.DestroyWindow() && module.GetLockCount() == 0);
     }

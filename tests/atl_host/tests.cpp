@@ -122,6 +122,43 @@ bool dialogTemplates() {
             CHECK(built.initialization[0].id == 711 && built.initialization[1].id == 712);
         }
     }
+    for (WORD id : {WORD(620), WORD(621), WORD(622), WORD(625), WORD(627)}) {
+        const HRSRC dialog = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(5));
+        const HRSRC init = ::FindResourceW(instance, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(240));
+        CHECK(dialog && init);
+        const auto bytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, dialog)));
+        const auto initBytes = static_cast<const BYTE*>(::LockResource(::LoadResource(instance, init)));
+        const DWORD size = ::SizeofResource(instance, dialog), initSize = ::SizeofResource(instance, init);
+        const std::vector<BYTE> snapshot(initBytes, initBytes + initSize);
+        const size_t minimum = id == 622 ? 26 : id == 627 ? 18 : id == 625 ? 14 : 10;
+        CHECK(initSize >= minimum && initSize - minimum <= 3);
+        AxDialogTemplate built;
+        CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, initSize) == ERROR_SUCCESS && built.converted);
+        CHECK(built.initialization.size() == ((id == 622 || id == 627) ? 2U : 1U));
+        const auto& first = built.initialization[0];
+        CHECK(first.id == 711 && first.stream.empty() && first.license.empty());
+        CHECK(first.kind == (id == 625 ? ATL::detail::AxDialogInit::Kind::Stream : ATL::detail::AxDialogInit::Kind::New));
+        if (id == 622) {
+            CHECK(built.initialization[1].id == 712 && built.initialization[1].kind == ATL::detail::AxDialogInit::Kind::Stream);
+            CHECK(built.initialization[1].stream.size() == 4 && built.initialization[1].stream[0] == 42);
+        }
+        CHECK(std::memcmp(initBytes, snapshot.data(), initSize) == 0);
+        for (size_t cut = 0; cut < minimum; ++cut) {
+            CHECK(BuildAxDialogTemplate(bytes, size, built, initBytes, cut) == ERROR_INVALID_DATA && built.storage.empty() && built.initialization.empty());
+        }
+        std::vector<BYTE> bad = snapshot;
+        const DWORD oversized = MAXDWORD;
+        std::memcpy(bad.data() + 4, &oversized, sizeof(oversized));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        bad = snapshot; const WORD ordinary = 714;
+        std::memcpy(bad.data(), &ordinary, sizeof(ordinary));
+        CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        if (id == 620) {
+            bad = snapshot; const WORD stream = 0x376;
+            std::memcpy(bad.data() + 2, &stream, sizeof(stream));
+            CHECK(BuildAxDialogTemplate(bytes, size, built, bad.data(), bad.size()) == ERROR_INVALID_DATA);
+        }
+    }
     return true;
 }
 struct FreeDialogState { bool modal = false; int initialized = 0; HWND window = nullptr; };
@@ -214,6 +251,11 @@ bool plainDialogs() {
     }
     for (WORD id : {WORD(615), WORD(616), WORD(617), WORD(618)}) {
         const DWORD error = id == 617 ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA;
+        CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == error);
+        CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == error);
+    }
+    for (WORD id : {WORD(623), WORD(624), WORD(626)}) {
+        const DWORD error = id == 623 ? ERROR_NOT_SUPPORTED : ERROR_INVALID_DATA;
         CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == error);
         CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == error);
     }
@@ -394,13 +436,13 @@ public:
     LRESULT Init(UINT, WPARAM, LPARAM value, BOOL&) {
         ++initialized; parameter = value;
         good = GetDlgControl(701, IID_IWebBrowser2, reinterpret_cast<void**>(&control.p)) == S_OK;
-        if (resource == 606 || resource == 607) {
+        if (resource == 606 || resource == 607 || resource == 630) {
             WCHAR name[32]{}, text[32]{};
             const HWND host = ::GetDlgItem(this->m_hWnd, 701);
             good = good && ::GetClassNameW(host, name, 32) && std::wcscmp(name, L"AtlAxWin140") == 0;
             good = good && (::GetWindowLongPtrW(host, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) != 0;
             good = good && ::GetDlgCtrlID(host) == 701 && ::GetDlgItemTextW(this->m_hWnd, 704, text, 32) && std::wcscmp(text, L"resource sibling") == 0;
-            if (resource == 606) good = good && ::GetWindowContextHelpId(host) == 273;
+            if (resource != 607) good = good && ::GetWindowContextHelpId(host) == 273;
         }
         good = good && ::SetTimer(this->m_hWnd, 1, 4500, nullptr) != 0;
         ::PostMessageW(this->m_hWnd, WM_APP + 81, 0, 0);
@@ -442,7 +484,7 @@ public:
     END_MSG_MAP()
 };
 bool controlDialogs(ATL::CAtlModule& module) {
-    for (WORD resource : {WORD(601), WORD(606), WORD(607)}) {
+    for (WORD resource : {WORD(601), WORD(606), WORD(607), WORD(630)}) {
         ControlDialog modeless;
         modeless.resource = resource;
         CHECK(modeless.Create(nullptr, 312) && modeless.initialized == 1 && modeless.parameter == 312);
