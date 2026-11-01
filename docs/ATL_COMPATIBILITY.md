@@ -555,10 +555,58 @@ AtlAdviseSinkMap for DocumentComplete, preserving its original runtime budget
 and stdout contract. No target, test mode, export, workflow or original blob is
 added or replaced; all 36 pinned original files remain byte-checked.
 
-CAxDialogImpl automatic resource/control creation, full composite controls,
+Full composite controls,
 same-nID multiple-IID bases, exact internal layouts and whole original event
 projects remain open. Applications must unadvise successfully before destroying
 the C++ sink owner and must own COM/apartment and UI-thread lifetimes.
 
 References: [AtlAdviseSinkMap](https://learn.microsoft.com/en-us/cpp/atl/reference/connection-point-global-functions),
 [CWindow::GetDlgControl](https://learn.microsoft.com/en-us/cpp/atl/reference/cwindow-class).
+
+## Control-hosting dialogs
+
+With atlhost.h included, CAxDialogImpl<T, TBase> uses the existing
+CDialogImplBaseT dispatcher, native window thunk and per-thread creation data.
+Create (including the RECT overload), DoModal, DestroyWindow, EndDialog,
+GetDialogProc, GetIDD and AdviseSinkMap are available; native IsDialogMessage
+is inherited. AtlAxCreateDialog and AtlAxDialogBox provide the corresponding
+resource-name/ID entry points. They register the existing AxWin classes without
+initializing COM, then use native CreateDialogParamW/DialogBoxParamW.
+
+Supported resources directly name AtlAxWin140/AtlAxWinLic140 host classes and a
+control CLSID, ProgID or supported URL as the control's text. Windows creates
+ordinary and hosted children, with its standard/extended template, font,
+geometry and parameter handling. CAxDialogImpl subscribes its sink map before
+the user's WM_INITDIALOG handler and unadvises before destruction. An owner
+without a sink map has no subscriptions. Init subscription failures destroy the
+dialog and report failure. Explicit DestroyWindow/EndDialog preserves the
+window if Unadvise fails so the application can retry; forced external
+destruction with failed cleanup terminates rather than leave dangling sinks.
+
+Creation status is kept outside the C++ owner's lifetime. WM_INITDIALOG may
+close the window, and OnFinalMessage may delete the owner, without creation
+cleanup dereferencing it afterward. Modeless destruction during initialization
+returns NULL; normal modal EndDialog returns its result. Thunk setup failures
+use the shared dialog failure hook and terminate the appropriate native creation
+path. Existing pending-data removal and deferred final notification are reused.
+
+DLGINIT stream/license records and CLSID-class placeholder splitting are not
+implemented. Resources with DLGINIT data or DS_NOFAILCREATE fail early with
+ERROR_NOT_SUPPORTED; unknown native child classes fail through Windows.
+Unimplemented resource initialization is not silently skipped. Full resource
+editor persistence/licensing, control-splitting/property pages, advanced OLE
+accelerators and full composite controls remain open. Header-independent and
+exact internal layout compatibility remain unqualified.
+
+Existing ActiveX cases embed own standard/extended and named dialog resources.
+Plain dialogs verify modal/modeless parameters, reuse, failure/close retry,
+self-deleting final callbacks and unchanged COM apartment state. The existing
+WebBrowser case also verifies real resource-created controls, automatic sink
+subscriptions, modal navigation/events, teardown and rollback when a later
+control cannot activate. The executable, test modes, original 25-second budgets,
+workflow and stdout markers are unchanged. All 36 pinned original blobs remain
+byte-checked; printing and hardware HSP stay outside CI.
+
+References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
+[dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
+[automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).

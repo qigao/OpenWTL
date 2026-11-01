@@ -12,6 +12,112 @@ bool RunMicrosoftSafeArrayTests();
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ACTIVEX_FAIL line=%d: %s hr=%08lx\n", __LINE__, #x, static_cast<unsigned long>(::GetLastError())); return false; } } while (0)
 namespace {
 inline constexpr IID EventIID = {0x56b852d1,0xe47c,0x48a6,{0x94,0x1b,0xde,0xae,0x8c,0x6d,0x08,0xfb}};
+struct FreeDialogState { bool modal = false; int initialized = 0; HWND window = nullptr; };
+INT_PTR CALLBACK FreeDialogProc(HWND window, UINT message, WPARAM, LPARAM parameter) {
+    if (message != WM_INITDIALOG) return FALSE;
+    auto state = reinterpret_cast<FreeDialogState*>(parameter);
+    ++state->initialized; state->window = window;
+    if (state->modal) ::EndDialog(window, 83);
+    return TRUE;
+}
+class PlainDialog : public ATL::CAxDialogImpl<PlainDialog> {
+public:
+    enum { IDD = 602 };
+    bool modal = false, modeRejected = false;
+    int initialized = 0, finalized = 0;
+    LPARAM parameter = 0;
+    LRESULT Init(UINT, WPARAM, LPARAM value, BOOL&) {
+        ++initialized; parameter = value;
+        if (modal) { modeRejected = !DestroyWindow(); EndDialog(73); }
+        return TRUE;
+    }
+    void OnFinalMessage(HWND) override { ++finalized; }
+    BEGIN_MSG_MAP(PlainDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+class InitFailureDialog : public ATL::CAxDialogImpl<InitFailureDialog> {
+public:
+    enum { IDD = 602 };
+    int initialized = 0, finalized = 0;
+    HRESULT AdviseSinkMap(bool advise) noexcept { return advise ? E_ACCESSDENIED : S_OK; }
+    LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) { ++initialized; return TRUE; }
+    void OnFinalMessage(HWND) override { ++finalized; }
+    BEGIN_MSG_MAP(InitFailureDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+struct DialogRetirement { int initialized = 0, finalized = 0, destroyed = 0; };
+class CloseFailureDialog : public ATL::CAxDialogImpl<CloseFailureDialog> {
+public:
+    enum { IDD = 602 };
+    bool fail = false, preserved = false;
+    HRESULT AdviseSinkMap(bool advise) noexcept { return !advise && fail ? E_ACCESSDENIED : S_OK; }
+    LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) {
+        if (m_bModal) {
+            fail = true; preserved = !EndDialog(1) && ::IsWindow(this->m_hWnd);
+            fail = false; EndDialog(82);
+        }
+        return TRUE;
+    }
+    BEGIN_MSG_MAP(CloseFailureDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+class DeletingDialog : public ATL::CAxDialogImpl<DeletingDialog> {
+    DialogRetirement& state_;
+    bool modal_;
+public:
+    enum { IDD = 602 };
+    DeletingDialog(DialogRetirement& state, bool modal) : state_(state), modal_(modal) {}
+    ~DeletingDialog() { ++state_.destroyed; }
+    LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) {
+        ++state_.initialized;
+        if (modal_) EndDialog(91); else DestroyWindow();
+        return TRUE;
+    }
+    void OnFinalMessage(HWND) override { ++state_.finalized; delete this; }
+    BEGIN_MSG_MAP(DeletingDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+bool plainDialogs() {
+    const HINSTANCE instance = ATL::_AtlBaseModule.GetResourceInstance();
+    FreeDialogState free;
+    HWND window = ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(602), nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free));
+    CHECK(window && free.window == window && free.initialized == 1 && ::GetDlgItem(window, 702));
+    CHECK(::DestroyWindow(window));
+    free.modal = true;
+    CHECK(ATL::AtlAxDialogBox(instance, L"OPENATL_PLAIN", nullptr, FreeDialogProc, reinterpret_cast<LPARAM>(&free)) == 83 && free.initialized == 2);
+    CHECK(!ATL::AtlAxCreateDialog(instance, nullptr, nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(999), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() != ERROR_SUCCESS);
+    for (WORD id : {WORD(604), WORD(605)}) {
+        CHECK(!ATL::AtlAxCreateDialog(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) && ::GetLastError() == ERROR_NOT_SUPPORTED);
+        CHECK(ATL::AtlAxDialogBox(instance, MAKEINTRESOURCEW(id), nullptr, FreeDialogProc, 0) == -1 && ::GetLastError() == ERROR_NOT_SUPPORTED);
+    }
+    PlainDialog plain; plain.modal = true;
+    CHECK(plain.GetIDD() == 602 && plain.GetDialogProc());
+    CHECK(plain.DoModal(nullptr, 1234) == 73 && plain.initialized == 1 && plain.finalized == 1 && plain.parameter == 1234 && plain.modeRejected && !plain.m_hWnd);
+    plain.modal = false; RECT ignored{};
+    CHECK(plain.Create(nullptr, ignored, 5678) && plain.parameter == 5678 && plain.initialized == 2);
+    CHECK(!plain.Create(nullptr) && ::GetLastError() == ERROR_ALREADY_EXISTS);
+    CHECK(!plain.EndDialog(0) && ::IsWindow(plain.m_hWnd));
+    CHECK(plain.DestroyWindow() && plain.finalized == 2 && !plain.m_hWnd);
+    InitFailureDialog failed;
+    CHECK(!failed.Create(nullptr) && ::GetLastError() == ERROR_ACCESS_DENIED && !failed.initialized && failed.finalized == 1 && !failed.m_hWnd);
+    CHECK(failed.DoModal(nullptr) == -1 && ::GetLastError() == ERROR_ACCESS_DENIED && !failed.initialized && failed.finalized == 2 && !failed.m_hWnd);
+    CloseFailureDialog retry;
+    CHECK(retry.Create(nullptr)); retry.fail = true;
+    CHECK(!retry.DestroyWindow() && ::GetLastError() == ERROR_ACCESS_DENIED && ::IsWindow(retry.m_hWnd));
+    retry.fail = false; CHECK(retry.DestroyWindow() && !retry.m_hWnd);
+    CHECK(retry.DoModal(nullptr) == 82 && retry.preserved && !retry.m_hWnd);
+    DialogRetirement modeless, modal;
+    CHECK(!(new DeletingDialog(modeless, false))->Create(nullptr));
+    CHECK(modeless.initialized == 1 && modeless.finalized == 1 && modeless.destroyed == 1);
+    CHECK((new DeletingDialog(modal, true))->DoModal(nullptr) == 91);
+    CHECK(modal.initialized == 1 && modal.finalized == 1 && modal.destroyed == 1);
+    return true;
+}
 class Source : public IConnectionPointContainer, public IConnectionPoint {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
@@ -150,6 +256,79 @@ public:
     void __stdcall Document(IDispatch*, VARIANT* value) { if (value && value->vt == VT_BSTR) ++documents; }
     int documents = 0;
 };
+class ControlDialog : public ATL::CAxDialogImpl<ControlDialog>,
+                      public ATL::IDispEventImpl<701, ControlDialog, &DIID_DWebBrowserEvents2> {
+public:
+    enum { IDD = 601 };
+    bool modal = false, good = true;
+    int initialized = 0, finalized = 0, documents = 0;
+    LPARAM parameter = 0;
+    ATL::CComPtr<IWebBrowser2> control;
+    BEGIN_SINK_MAP(ControlDialog)
+        SINK_ENTRY_EX(701, DIID_DWebBrowserEvents2, 259, &ControlDialog::Document)
+    END_SINK_MAP()
+    LRESULT Init(UINT, WPARAM, LPARAM value, BOOL&) {
+        ++initialized; parameter = value;
+        good = GetDlgControl(701, IID_IWebBrowser2, reinterpret_cast<void**>(&control.p)) == S_OK;
+        good = good && ::SetTimer(this->m_hWnd, 1, 4500, nullptr) != 0;
+        ::PostMessageW(this->m_hWnd, WM_APP + 81, 0, 0);
+        return TRUE;
+    }
+    void Finish(int result) {
+        if (modal) { if (!EndDialog(result)) { good = false; ::EndDialog(this->m_hWnd, -2); } }
+        else if (!DestroyWindow()) { good = false; ::DestroyWindow(this->m_hWnd); }
+    }
+    LRESULT Start(UINT, WPARAM, LPARAM, BOOL&) {
+        ATL::CComVariant url(L"about:blank#openatl-dialog"), empty;
+        if (!good || control->Navigate2(&url, &empty, &empty, &empty, &empty) != S_OK) { good = false; Finish(-2); }
+        return 0;
+    }
+    LRESULT Timeout(UINT, WPARAM, LPARAM, BOOL&) { good = false; Finish(-2); return 0; }
+    LRESULT Destroy(UINT, WPARAM, LPARAM, BOOL&) { control.Release(); return 0; }
+    void Document(IDispatch*, VARIANT* value) {
+        if (!value || value->vt != VT_BSTR) return;
+        ++documents; ::KillTimer(this->m_hWnd, 1);
+        if (modal) Finish(73);
+    }
+    void OnFinalMessage(HWND) override { ++finalized; }
+    BEGIN_MSG_MAP(ControlDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+        MESSAGE_HANDLER(WM_APP + 81, Start)
+        MESSAGE_HANDLER(WM_TIMER, Timeout)
+        MESSAGE_HANDLER(WM_DESTROY, Destroy)
+    END_MSG_MAP()
+};
+class MissingControlDialog : public ATL::CAxDialogImpl<MissingControlDialog> {
+public:
+    enum { IDD = 603 };
+    int initialized = 0;
+    LRESULT Init(UINT, WPARAM, LPARAM, BOOL&) { ++initialized; return TRUE; }
+    BEGIN_MSG_MAP(MissingControlDialog)
+        MESSAGE_HANDLER(WM_INITDIALOG, Init)
+    END_MSG_MAP()
+};
+bool controlDialogs(ATL::CAtlModule& module) {
+    ControlDialog modeless;
+    CHECK(modeless.Create(nullptr, 312) && modeless.initialized == 1 && modeless.parameter == 312);
+    CHECK(modeless.AdviseSinkMap(true) == CONNECT_E_ADVISELIMIT);
+    const ULONGLONG deadline = ::GetTickCount64() + 6000;
+    while (!modeless.documents && modeless.m_hWnd && ::GetTickCount64() < deadline) {
+        MSG message{};
+        while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (!modeless.IsDialogMessage(&message)) { ::TranslateMessage(&message); ::DispatchMessageW(&message); }
+        }
+        ::MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+    }
+    CHECK(modeless.good && modeless.documents && modeless.DestroyWindow() && modeless.finalized == 1 && !modeless.m_hWnd);
+    CHECK(modeless.AdviseSinkMap(false) == S_OK && module.GetLockCount() == 0);
+    ControlDialog modal; modal.modal = true;
+    CHECK(modal.DoModal(nullptr, 728) == 73 && modal.good && modal.documents && modal.initialized == 1 && modal.parameter == 728 && modal.finalized == 1 && !modal.m_hWnd);
+    CHECK(module.GetLockCount() == 0);
+    MissingControlDialog missing;
+    CHECK(!missing.Create(nullptr) && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
+    CHECK(missing.DoModal(nullptr) == -1 && !missing.initialized && !missing.m_hWnd && module.GetLockCount() == 0);
+    return true;
+}
 void BrowserPhase(int cycle, const char* phase) noexcept {
     // Keep real IWebBrowser2 admission and its original 25s CTest budget.
     // If a hosted Windows runner stalls inside a synchronous OLE call, log
@@ -237,7 +416,7 @@ bool browser() {
     }
     CHECK(module.GetLockCount() == 0);
     BrowserPhase(-1, "complete");
-    return true;
+    return controlDialogs(module);
 }
 }
 int main(int argc, char** argv) {
@@ -250,6 +429,7 @@ int main(int argc, char** argv) {
     ULONG_PTR token = 0;
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
+    if (!plainDialogs() || ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
     bool ok = true;
 #if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)

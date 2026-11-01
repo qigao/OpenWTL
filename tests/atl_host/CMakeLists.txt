@@ -1,4 +1,4 @@
-add_executable(openatl_activex tests.cpp lifecycle.cpp)
+add_executable(openatl_activex tests.cpp lifecycle.cpp dialog_resources.rc)
 target_link_libraries(openatl_activex PRIVATE OpenWTL::WTL)
 set_target_properties(openatl_activex PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 if(MINGW)

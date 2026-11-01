@@ -61,6 +61,13 @@ child interfaces when atlhost.h is included. Batch Unadvise uses retained
 sources, attempts every group and preserves failures for retry, including after
 child lookup becomes unavailable. See [sink-map scope](ATL_COMPATIBILITY.md#sink-map-subscriptions)
 for preflight, reentrancy, rollback-failure and remaining composite-control limits.
+CAxDialogImpl and AtlAxCreateDialog/AtlAxDialogBox create native resource dialogs
+whose controls name the existing AxWin host classes. The class automatically
+subscribes before WM_INITDIALOG and unadvises before destruction, using the same
+dialog thunk/dispatcher. Explicit close failures preserve the window for retry.
+DLGINIT persistence/license records and CLSID-class splitting remain unsupported;
+unsupported initialization fails rather than being skipped. See
+[control-dialog scope](ATL_COMPATIBILITY.md#control-hosting-dialogs).
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
 
