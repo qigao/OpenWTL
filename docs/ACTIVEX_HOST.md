@@ -69,11 +69,14 @@ Standard/extended resources may also name a literal CLSID as a control class:
 validated empty placeholders are converted into the existing AxWin host with
 the CLSID as its creation text. Ordinary controls and original resource bytes
 are preserved. Bounded DLGINIT 0x0376 records supply counted license keys and
-persisted bytes to the existing native factory/stream initialization. Empty
+persisted bytes to the existing native factory/stream initialization. Records
+with message 0x0377 use the same counted key prefix followed by a compound-file
+image. Windows opens a private, read-only IStorage over native ILockBytes and
+the host selects IPersistStorage::Load without stream/default fallback. Empty
 0x0378 INITNEW records use a null stream and the existing InitNew path; even an
 empty 0x0376 stream still calls Load. Nonempty INITNEW payloads remain unsupported.
 Initialization finishes before application WM_INITDIALOG and automatic sink subscriptions;
-failed or reentrant retirement destroys the partial dialog. Storage, binding,
+failed or reentrant retirement destroys the partial dialog. Storage saving/switching, binding,
 ordinary list/combo messages and nonempty inline placeholder data still
 fail explicitly. This path creates all native children before initializing controls
 and does not forward early application dialog callbacks. See
@@ -81,7 +84,7 @@ and does not forward early application dialog callbacks. See
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
 
-Windowless drawing/input, OLE document storage and menu merging are not yet
+Windowless drawing/input, full OLE document saving/storage switching and menu merging are not yet
 implemented. Windowless activation is explicitly
 declined through QueryInterface and its property setter. Returning S_FALSE from
 host UI methods requests the control's standard UI; it does not fabricate an

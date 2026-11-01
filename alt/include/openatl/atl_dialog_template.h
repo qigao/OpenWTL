@@ -14,7 +14,7 @@
 
 namespace ATL { namespace detail {
 struct AxDialogInit {
-    enum class Kind { Stream, New };
+    enum class Kind { Stream, New, Storage };
     WORD id = 0;
     Kind kind = Kind::Stream;
     std::wstring name, license;
@@ -75,7 +75,7 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                     break;
                 }
                 if (!init.Read(message) || !init.Read(length) || length > init.size - init.position) return ERROR_INVALID_DATA;
-                if (message != 0x0376 && message != 0x0378) return ERROR_NOT_SUPPORTED;
+                if (message != 0x0376 && message != 0x0377 && message != 0x0378) return ERROR_NOT_SUPPORTED;
                 for (const auto& previous : initialization) if (previous.id == id) return ERROR_INVALID_DATA;
                 AxDialogInit record; record.id = id;
                 if (message == 0x0378) {
@@ -84,6 +84,7 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                     if (length) return ERROR_NOT_SUPPORTED;
                     record.kind = AxDialogInit::Kind::New;
                 } else {
+                    if (message == 0x0377) record.kind = AxDialogInit::Kind::Storage;
                     DialogTemplateReader payload(init.bytes + init.position, length);
                     if (!payload.Read(characters) || characters > (payload.size - payload.position) / sizeof(WCHAR)) return ERROR_INVALID_DATA;
                     record.license.resize(characters);

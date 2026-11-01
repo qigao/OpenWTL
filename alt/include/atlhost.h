@@ -110,18 +110,18 @@ public:
         return CreateNamedControl(name, window, stream, output, iid, sink, nullptr);
     }
     HRESULT CreateNamedControl(LPCOLESTR name, HWND window, IStream* stream, IUnknown** output,
-                               REFIID iid, IUnknown* sink, BSTR license) noexcept {
+                               REFIID iid, IUnknown* sink, BSTR license, IStorage* storage = nullptr) noexcept {
         if (output) *output = nullptr;
         HRESULT hr = CheckWindow();
         if (FAILED(hr)) return hr;
-        if (window != window_ || !name) return E_INVALIDARG;
+        if (window != window_ || !name || (stream && storage)) return E_INVALIDARG;
         if (control_ || creating_ || closing_) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
         CComPtr<IUnknown> keep(static_cast<IOleClientSite*>(this));
         struct Creating { bool& value; Creating(bool& v) : value(v) { v = true; } ~Creating() { value = false; } } creating(creating_);
         CLSID clsid{};
         bool navigate = false;
         hr = RegisteredClassId(name, &clsid);
-        if (FAILED(hr) && (license || name[0] == L'{')) return hr;
+        if (FAILED(hr) && (license || storage || name[0] == L'{')) return hr;
         if (FAILED(hr)) { clsid = CLSID_WebBrowser; navigate = true; }
         CComPtr<IOleObject> object;
         if (license) {
@@ -135,7 +135,7 @@ public:
                                     IID_IOleObject, reinterpret_cast<void**>(&object));
         }
         if (FAILED(hr)) return hr;
-        hr = InitializeAndAttach(object, window, stream, true);
+        hr = InitializeAndAttach(object, window, stream, true, storage);
         if (SUCCEEDED(hr) && sink) hr = Connect(sink, iid);
         if (SUCCEEDED(hr) && navigate) {
             CComPtr<IWebBrowser2> browser;
@@ -167,11 +167,12 @@ public:
         struct Creating { bool& value; Creating(bool& v) : value(v) { v = true; } ~Creating() { value = false; } } creating(creating_);
         return InitializeAndAttach(object, window, nullptr, false);
     }
-    HRESULT InitializeAndAttach(IUnknown* object, HWND window, IStream* stream, bool initialize) noexcept {
+    HRESULT InitializeAndAttach(IUnknown* object, HWND window, IStream* stream, bool initialize,
+                                IStorage* storage = nullptr) noexcept {
         HRESULT hr = CheckWindow();
         if (FAILED(hr)) return hr;
         if (!object) return E_POINTER;
-        if (window != window_) return E_INVALIDARG;
+        if (window != window_ || (storage && (stream || !initialize))) return E_INVALIDARG;
         if (control_ || closing_) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
         CComPtr<IOleObject> ole;
         hr = object->QueryInterface(IID_IOleObject, reinterpret_cast<void**>(&ole));
@@ -186,7 +187,14 @@ public:
             hr = FinishStep(ole, ole->SetClientSite(static_cast<IOleClientSite*>(this)));
             if (FAILED(hr)) return hr;
         }
-        if (initialize) {
+        if (initialize && storage) {
+            CComPtr<IPersistStorage> persist;
+            hr = ole->QueryInterface(IID_IPersistStorage, reinterpret_cast<void**>(&persist));
+            const HRESULT alive = FinishStep(ole, hr);
+            if (FAILED(alive)) return alive;
+            hr = FinishStep(ole, persist ? persist->Load(storage) : E_UNEXPECTED);
+            if (FAILED(hr)) return hr;
+        } else if (initialize) {
             CComPtr<IPersistStreamInit> persist;
             hr = ole->QueryInterface(IID_IPersistStreamInit, reinterpret_cast<void**>(&persist));
             HRESULT alive = FinishStep(ole, hr == E_NOINTERFACE ? S_OK : hr);
@@ -511,6 +519,7 @@ struct AxDialogCreation {
             const HWND child = ::GetDlgItem(dialog, record.id);
             if (!child) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
             CComPtr<IStream> stream;
+            CComPtr<IStorage> storage;
             HRESULT hr = S_OK;
             if (record.kind == AxDialogInit::Kind::Stream) {
                 hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &stream);
@@ -524,6 +533,23 @@ struct AxDialogCreation {
                 LARGE_INTEGER start{};
                 hr = stream->Seek(start, STREAM_SEEK_SET, nullptr);
                 if (FAILED(hr)) return hr;
+            } else if (record.kind == AxDialogInit::Kind::Storage) {
+                // Own a private byte array; the native structured-storage
+                // implementation validates and opens the compound image.
+                CComPtr<ILockBytes> bytes;
+                hr = ::CreateILockBytesOnHGlobal(nullptr, TRUE, &bytes);
+                if (FAILED(hr)) return hr;
+                ULARGE_INTEGER size{}; size.QuadPart = record.stream.size();
+                hr = bytes->SetSize(size);
+                if (FAILED(hr)) return hr;
+                if (!record.stream.empty()) {
+                    ULARGE_INTEGER offset{}; ULONG written = 0;
+                    hr = bytes->WriteAt(offset, record.stream.data(), static_cast<ULONG>(record.stream.size()), &written);
+                    if (FAILED(hr)) return hr;
+                    if (written != record.stream.size()) return STG_E_WRITEFAULT;
+                }
+                hr = ::StgOpenStorageOnILockBytes(bytes, nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, nullptr, 0, &storage);
+                if (FAILED(hr)) return hr;
             }
             CComBSTR license;
             if (!record.license.empty()) {
@@ -532,7 +558,7 @@ struct AxDialogCreation {
             }
             CComPtr<AxHost> host;
             hr = GetAxHost(child, &host, false);
-            if (SUCCEEDED(hr)) hr = host->CreateNamedControl(record.name.c_str(), child, stream, nullptr, IID_NULL, nullptr, license);
+            if (SUCCEEDED(hr)) hr = host->CreateNamedControl(record.name.c_str(), child, stream, nullptr, IID_NULL, nullptr, license, storage);
             if (FAILED(hr)) return hr;
             if (!::IsWindow(dialog) || !::IsWindow(child) || ::GetParent(child) != dialog) return E_ABORT;
         }

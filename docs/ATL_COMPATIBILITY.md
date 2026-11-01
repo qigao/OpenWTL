@@ -605,8 +605,8 @@ Malformed/truncated templates and malformed brace-prefixed CLSID classes fail
 ERROR_INVALID_DATA. Nonempty placeholder titles or inline ActiveX creation data,
 Unsupported DLGINIT records and DS_NOFAILCREATE fail ERROR_NOT_SUPPORTED.
 Unknown ordinary native child classes fail through Windows.
-Unimplemented resource initialization is not silently skipped. Storage and data
-binding persistence, full control-splitting/property pages, advanced OLE
+Unimplemented resource initialization is not silently skipped. Data binding,
+storage saving/switching, full control-splitting/property pages, advanced OLE
 accelerators and full composite controls remain open. Header-independent and
 exact internal layout compatibility remain unqualified.
 
@@ -618,8 +618,32 @@ zero padding bytes are accepted. The license is a counted BSTR, including any
 embedded zero characters. An absent key uses normal factory creation. Duplicate
 records, missing/non-host control IDs, duplicate matching dialog IDs, truncated
 headers/payloads/keys and nonzero trailing data fail ERROR_INVALID_DATA before
-any window is created. Storage, data-binding extension and ordinary
+any window is created. Data-binding extension and ordinary
 list/combo initialization messages currently fail ERROR_NOT_SUPPORTED.
+
+DLGINIT storage records (message 0x0377) use the same counted UTF-16 license
+prefix, followed by a complete compound-file image. The bounded resource reader
+retains a distinct Storage kind. During dialog initialization, the host copies
+the image into a new native ILockBytes with an exact logical size and opens it
+with StgOpenStorageOnILockBytes in STGM_READ | STGM_SHARE_EXCLUSIVE mode. The
+original resource is not writable and each record gets independent backing
+bytes. Windows validates the compound file; corrupt/empty images fail dialog
+initialization and roll back every partial host. Only envelope bounds/IDs/keys
+are validated before creating windows; compound-file validation occurs during
+initialization before the application WM_INITDIALOG callback.
+
+Storage initialization queries IPersistStorage and calls Load between the same
+OLEMISC_SETCLIENTSITEFIRST-aware site/activation steps. A missing interface or
+failed Load is an error, with no fallback to IPersistStreamInit, IPersistStream
+or InitNew. Stream and storage inputs are mutually exclusive internally. Counted
+keys still use IClassFactory2::CreateInstanceLic. The control must AddRef/cache
+its incoming storage as required by IPersistStorage::Load; the local container
+reference is released after each initialization. Native storage retains its
+owned backing array, including when the control reads after the dialog callback
+has advanced. Normal Close/detachment remains the existing cleanup protocol.
+This is a load-only windowed resource path: storage Save/SaveCompleted,
+HandsOffStorage-based file switching, full compound-document hosting and
+storage-only InitNew are not implemented.
 
 Empty DLGINIT INITNEW records (message 0x0378, payload length zero) select the
 existing host's default initialization path with a null IStream. They call
@@ -664,6 +688,10 @@ both modal/modeless paths and cleanup after a later converted control fails.
 References: [CAxDialogImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/caxdialogimpl-class),
 [dialog helpers](https://learn.microsoft.com/en-us/cpp/atl/reference/composite-control-global-functions),
 [automatic event handling](https://learn.microsoft.com/en-us/cpp/atl/atl-event-handling-summary).
+Native storage: [IPersistStorage::Load](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-load),
+[StgOpenStorageOnILockBytes](https://learn.microsoft.com/en-us/windows/win32/api/coml2api/nf-coml2api-stgopenstorageonilockbytes),
+[CreateILockBytesOnHGlobal](https://learn.microsoft.com/en-us/windows/win32/api/coml2api/nf-coml2api-createilockbytesonhglobal),
+[MS-CFB format](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/53989ce4-7b05-4f8d-829b-d08d6148375b).
 Native persistence: [IPersistStreamInit::InitNew](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-initnew),
 [IPersistStreamInit::Load](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipersiststreaminit-load),
 [IClassFactory2::CreateInstanceLic](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iclassfactory2-createinstancelic).
@@ -697,3 +725,14 @@ The existing WebBrowser case additionally creates an INITNEW resource dialog in
 both modal and modeless paths and verifies native navigation, TypeLib events,
 automatic sink subscription, retained resource styles/help IDs and teardown.
 The executable, modes and original 25-second budget remain unchanged.
+
+The existing lifecycle case additionally consumes a compiled, own 2560-byte
+MS-CFB v3 fixture with a four-byte Marker stream. Standard/extended resources
+exercise licensed/unlicensed storage loads, explicit kind selection even when
+stream interfaces exist, both site orders, mixed storage/INITNEW/stream records
+in reverse resource order, read-only enforcement, cached reads after local
+container references expire, close with a retained control, absent IPersistStorage,
+license rejection, failed first/later Load, reentrant storage QI/load retirement,
+modal/modeless rollback and owner reuse. Corrupt compound images fail through
+native APIs. Pre-OLE checks cover bounded storage payloads and license prefixes;
+no COM initialization or original application admission is inferred.
