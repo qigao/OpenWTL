@@ -1129,8 +1129,9 @@ and odd-byte BSTR payloads are counted, not scanned. Short reads/writes
 return STG_E_READFAULT/STG_E_WRITEFAULT; failed HRESULTs are propagated.
 Invalid terminators are rejected. Reads stage native BSTR ownership and
 preserve the previous value on failure; the stream position is not rolled
-back. Writes can leave a partial record. Callers must bound untrusted
-stream sizes before invoking this allocation-based API.
+back. Writes can leave a partial record. Callers must validate the encoded ULONG byte count against their allocation
+budget before invoking this allocation-based API; bounding only the actual
+stream size does not bound the declared allocation.
 
 This is the first subset of #94. The bounded VARIANT stream candidate is documented below; property-map stream
 persistence and IPersistStreamInitImpl remain unimplemented. #95–#97 are
@@ -1149,3 +1150,9 @@ unsupported or short input, and propagate VariantClear failures (such as a
 locked destination SAFEARRAY). The stream position is not rolled back.
 Property-map persistence is still missing under #94. This is a bounded subset,
 not a claim that all ATL stream formats or interface persistence are supported.
+
+The scalar/BSTR fixture checks prove this implementation's explicit byte
+contract and ownership, not interoperability with every Microsoft ATL release.
+EMPTY/NULL and I8/UI8 stream representations in particular still require
+independent target-version ATL evidence before claiming interoperability.
+The public CComVariant methods do not coerce unsupported values through BSTR.

@@ -283,6 +283,84 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
         variantText.WriteToStream(nullptr)!=E_POINTER)
         return failure(91,"VARIANT_unsupported_no_write",E_FAIL);
 
+    // A BSTR record has three transfers: tag, byte count, and payload.
+    // Every fault must retain the destination and leave the source owned.
+    for (unsigned at=1;at<=3;++at) {
+        const HRESULT results[] = {S_OK,S_FALSE,E_ACCESSDENIED};
+        for (HRESULT injected : results) {
+            if (variantStream->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+                return failure(92,"VARIANT_fault_rewind",E_FAIL);
+            StreamTransferFault reader(variantStream,at,injected);
+            ATL::CComVariant destination(L"keep");
+            BSTR previous=destination.bstrVal;
+            hr=destination.ReadFromStream(&reader);
+            if (hr!=(FAILED(injected)?injected:STG_E_READFAULT) ||
+                destination.vt!=VT_BSTR || destination.bstrVal!=previous ||
+                std::wcscmp(destination.bstrVal,L"keep"))
+                return failure(93,"VARIANT_injected_read_preserves_owner",hr);
+            ATL::CComPtr<IStream> target;
+            if (::CreateStreamOnHGlobal(nullptr,TRUE,&target)!=S_OK)
+                return failure(94,"VARIANT_fault_target",E_FAIL);
+            StreamTransferFault writer(target,at,injected);
+            BSTR sourceOwner=variantText.bstrVal;
+            hr=variantText.WriteToStream(&writer);
+            if (hr!=(FAILED(injected)?injected:STG_E_WRITEFAULT) ||
+                variantText.vt!=VT_BSTR || variantText.bstrVal!=sourceOwner ||
+                ::SysStringLen(sourceOwner)!=3 ||
+                std::memcmp(sourceOwner,embeddedA,sizeof(embeddedA)))
+                return failure(95,"VARIANT_injected_write_preserves_owner",hr);
+        }
+    }
+    // An unsupported input tag is never passed to VariantClear or used as
+    // an allocation/activation request. Only the two-byte tag is consumed.
+    const VARTYPE unsupported[] = {VT_ARRAY|VT_UI1, VT_BYREF|VT_I4,
+        VT_RECORD, VT_DECIMAL, VT_UNKNOWN, VT_DISPATCH, 0xffff};
+    for (VARTYPE tag : unsupported) {
+        ATL::CComPtr<IStream> input;
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&input)!=S_OK ||
+            input->Write(&tag,sizeof(tag),nullptr)!=S_OK ||
+            input->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+            return failure(96,"VARIANT_bad_tag_setup",E_FAIL);
+        ATL::CComVariant destination(123);
+        if (destination.ReadFromStream(input)!=DISP_E_BADVARTYPE ||
+            destination.vt!=VT_I4 || destination.lVal!=123)
+            return failure(97,"VARIANT_bad_tag_preserves_value",E_FAIL);
+    }
+    // Reuse independently specified BSTR records inside a VARIANT envelope;
+    // compare byte counts rather than the text-only equality operator.
+    for (unsigned i=0;i<3;++i) {
+        ATL::CComPtr<IStream> input, output;
+        const VARTYPE tag=VT_BSTR;
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&input)!=S_OK ||
+            input->Write(&tag,sizeof(tag),nullptr)!=S_OK ||
+            input->Write(records[i],sizes[i],nullptr)!=S_OK ||
+            input->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+            return failure(100,"VARIANT_binary_BSTR_setup",E_FAIL);
+        ATL::CComVariant value(123);
+        hr=value.ReadFromStream(input);
+        if (hr!=S_OK || value.vt!=VT_BSTR ||
+            (i==0 ? value.bstrVal!=nullptr : value.bstrVal==nullptr) ||
+            ::SysStringByteLen(value.bstrVal)!=(i==2?3u:0u) ||
+            (i==2 && std::memcmp(value.bstrVal,records[i]+4,3)))
+            return failure(101,"VARIANT_binary_BSTR_read",hr);
+        unsigned char actual[11]{};
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&output)!=S_OK ||
+            value.WriteToStream(output)!=S_OK ||
+            output->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
+            output->Read(actual,sizes[i]+sizeof(tag),&read)!=S_OK ||
+            read!=sizes[i]+sizeof(tag) || actual[0]!=VT_BSTR || actual[1] ||
+            std::memcmp(actual+sizeof(tag),records[i],sizes[i]))
+            return failure(102,"VARIANT_binary_BSTR_write",E_FAIL);
+    }
+    ATL::CComPtr<IStream> truncatedScalar;
+    const unsigned char incompleteI4[] = {VT_I4,0,0x42,0};
+    if (::CreateStreamOnHGlobal(nullptr,TRUE,&truncatedScalar)!=S_OK ||
+        truncatedScalar->Write(incompleteI4,sizeof(incompleteI4),nullptr)!=S_OK ||
+        truncatedScalar->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
+        variantRead.ReadFromStream(truncatedScalar)!=STG_E_READFAULT ||
+        variantRead!=variantText)
+        return failure(98,"VARIANT_short_scalar_preserves_BSTR",E_FAIL);
+
     ATL::CComVariant va;
     va.vt = VT_BSTR;
     va.bstrVal = ::SysAllocStringLen(embeddedA,3);
@@ -331,15 +409,23 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
     hr = ::SafeArrayLock(lockedArray);
     if (FAILED(hr))
         return failure(69, "VARIANT_array_lock", hr);
+    HRESULT streamClear = variantStream->Seek(start,STREAM_SEEK_SET,nullptr);
+    if (streamClear==S_OK) streamClear=guarded.ReadFromStream(variantStream);
+    const bool streamRetained=streamClear==DISP_E_ARRAYISLOCKED &&
+        guarded.vt==(VT_ARRAY|VT_UI1) && guarded.parray==lockedArray;
     guarded = 314;
     const bool retained = guarded.vt == (VT_ARRAY | VT_UI1) &&
                           guarded.parray == lockedArray;
     hr = ::SafeArrayUnlock(lockedArray);
-    if (FAILED(hr) || !retained) {
+    if (FAILED(hr) || !retained || !streamRetained) {
         if (!retained)
             (void)::SafeArrayDestroy(lockedArray);
         return failure(70, "VARIANT_locked_array_owner_preserved", hr);
     }
+    // The same staged load succeeds once native ownership can be released.
+    if (variantStream->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
+        guarded.ReadFromStream(variantStream)!=S_OK || guarded!=variantText)
+        return failure(99,"VARIANT_stream_after_unlock",E_FAIL);
     guarded = 314;
     if (guarded.vt != VT_I4 || guarded.lVal != 314)
         return failure(71, "VARIANT_assignment_after_unlock", E_FAIL);
