@@ -520,3 +520,17 @@ borrowed, and separates nondelegating inner lifetime from interface references
 that retain the outer. The object pins the engine and application module until
 the contained Base destructor finishes, even after the factory is released.
 See COM_SERVER.md for aggregate map ownership and the qualified native tests.
+
+
+## Original Microsoft two-DLL integration
+
+The existing unload fixture/probe images now also compile byte-pinned original
+COMMap.cpp/Aggreg.cpp module entry points and their respective original .rc
+resources/class sources. The original four private COM exports join the GUI
+exports. Existing GUI cases still verify no implicit COM initialization.
+The STA events case calls original per-user register/unregister exports,
+native CoCreateInstance and registered dispatch, checks vtable image ownership,
+retains a cached owner across unregister, and verifies actual DLL unmapping
+once objects and COM caches retire. No target, test mode or workflow is added.
+This qualifies the original module path in existing images; untouched VCXPROJ
+builds, original output/export layouts and machine-wide policies remain open.

@@ -658,8 +658,8 @@ retains the owner and module pins after factory revocation until final release.
 Repeated identical object entries from headers coalesce by type/CLSID/callback
 identity. Conflicting registrations remain invalid. No original methods/macros
 are transformed; no test target or mode is added. This does not admit the
-original COMMap.cpp/Aggreg.cpp DLL entry points, separate original binary
-resources or complete original DLL registration/project deployment. The original classes
+unchanged original VCXPROJ builds, original output/export layout or
+machine-wide DLL deployment. Original module/resource integration follows below. The original classes
 remain single-threaded and are used on the existing STA owner.
 
 
@@ -674,3 +674,22 @@ ITypeInfo remains invocable. Missing libraries never fall back to the embedded
 images. Original tear-off IIDs omitted by COMMap.tlb return
 TYPE_E_ELEMENTNOTFOUND while its library is registered. Tests reject preexisting
 sample keys and share the existing COM registration resource lock.
+
+
+## Original DLL module/resource integration
+
+Two existing unload DLLs additionally compile the unchanged COMMap.cpp and
+Aggreg.cpp module entry points, class bodies and original .rc resources.
+Their original private COM exports join the existing GUI exports. A test-only
+per-image initializer selects per-user registration metadata; COM and registry
+work occur only through the original exports after LoadLibrary returns.
+Existing GUI unload/no-COM checks and test entry points remain intact.
+
+After local source-subset factory retirement, the existing STA events case
+registers both DLLs, checks actual HKCU class/TypeLib paths, and performs native
+CoCreateInstance, direct/registered Invoke on all eight routes and five property
+interfaces. Interface vtable allocation bases must identify the correct DLL;
+each module rejects the other module's classes. Both unregister while a cached
+interface retains the owner/inners. All owned interfaces and COM caches retire
+before both images are verified unmapped. Original project builds, binary
+filename/export layout, machine-wide deployment and exact ATL layout remain open.

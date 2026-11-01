@@ -35,6 +35,7 @@ if(CMAKE_HOST_WIN32)
   target_sources(openatl_activex PRIVATE "${_commap_registry_rc}")
   set_source_files_properties("${PROJECT_BINARY_DIR}/tests/com_server/fixture_typelib.rc"
     PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb")
-  add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture)
+  add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture
+    openatl_unload_fixture openatl_unload_probe)
   set_tests_properties(openatl.activex_events PROPERTIES RESOURCE_LOCK openatl_com_server_registration)
 endif()

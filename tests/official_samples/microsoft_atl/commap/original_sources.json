@@ -26,6 +26,12 @@
     "aggreg/AutoAgg.rgs": "59daf93bd06452184a25a5308a70b4298f3eee11",
     "aggreg/AutoAggB.rgs": "6b9b2c56a3aad0eb6abe49b9070b527925f5e9c7",
     "../../../atl_rgs/fixtures/Outer.rgs": "0ff53ea6aa644a7b96ec6a6f77dc8ab3f1680285",
-    "../../../atl_rgs/fixtures/Chain.rgs": "30525e92df26595e9bc00015ea970b3ea5d97e04"
+    "../../../atl_rgs/fixtures/Chain.rgs": "30525e92df26595e9bc00015ea970b3ea5d97e04",
+    "COMMap.cpp": "6a6221445eafb0e73460f6fd122e12ae2db1f61b",
+    "COMMap.rc": "83f55568b7b7a3f9d71deb7af4f367b3cb316ca2",
+    "COMMap.def": "57af0c1c58f90c800afffc2f04547a90c63ab7c7",
+    "aggreg/Aggreg.cpp": "5efeadebeaaf27c5782b85bc48587f1ede61efb6",
+    "aggreg/Aggreg.rc": "07a590124c58d4efea541fbd2eda38be4ee3143e",
+    "aggreg/Aggreg.def": "f6a839558fa3531b98796a0261dbb0aa9034e222"
   }
 }

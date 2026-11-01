@@ -236,3 +236,11 @@ registered-mode IDispatchImpl executes IOuter/IChain and all four aggregates;
 independent unregister rejects fresh lookups with no image fallback. Original
 tear-off IIDs omitted from the TypeLib remain TYPE_E_ELEMENTNOTFOUND while the
 library is registered. This does not qualify full original DLL deployment.
+
+
+The original COMMap/Aggreg module .cpp and .rc inputs are also compiled into
+two existing DLLs. The existing STA events case qualifies their original
+registration exports, per-user paths, native activation/registered dispatch,
+interface image ownership, cached-owner retirement and actual DLL unmapping.
+This uses the existing production module/RGS/TypeLib engines unchanged.
+Untouched original project builds and exact binary/type layouts remain open.

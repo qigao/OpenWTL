@@ -122,8 +122,9 @@ remain open. API-level limits belong to the linked contracts; downstream
 applications still need acceptance for their own behavior and lifetimes.
 
 Unchanged Microsoft COMMap/aggreg class bodies also have native source-subset
-coverage, including their six RGS callbacks and registered dispatch; the
-complete original DLL projects remain unqualified. See the
+coverage, including original DLL module/resources, per-user registration and
+registered dispatch in existing test images; unchanged original project builds
+remain unqualified. See the
 [original sample scope](docs/OFFICIAL_SAMPLES.md).
 
 ## Source provenance and licensing

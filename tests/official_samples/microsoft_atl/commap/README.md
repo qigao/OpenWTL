@@ -2,9 +2,9 @@
 
 The snapshot comes from `microsoft/VCSamples@9e1d4475555b76a17a3568369867f1d7b6cc6126`,
 `VC2010Samples/ATL/General/commap`. `original_sources.json` records the exact Git
-blob SHA of all 24 original files: COMMap.idl, Outer/Chain source and headers,
+blob SHA of all 30 original files: COMMap.idl, Outer/Chain source and headers,
 premap/resource headers, the nested aggreg classes/headers/Aggreg.idl, and all
-six RGS scripts. Outer.rgs/Chain.rgs reuse the existing canonical fixtures.
+six RGS scripts and both module .cpp/.rc/.def sets. Outer.rgs/Chain.rgs reuse the existing canonical fixtures.
 `check_idl.py` checks every byte before native generation/build. Attributes
 preserve source bytes and original whitespace; the upstream MIT license is
 retained in `../MICROSOFT_LICENSE.txt`.
@@ -16,7 +16,7 @@ AutoAggB.cpp and their original headers against OpenWTL::WTL. A separate native
 harness calls their actual class factories and methods; no original method,
 macro or CLSID is renamed or replaced. The target uses the original apartment
 threading definition consistently and runs those single-threaded classes in STA.
-No new executable, mode, test entry, workflow or exported function is added.
+No new target, mode, test entry or workflow is added.
 
 The harness verifies repeated header object entries collapse to six logical
 classes, actual process-local CoCreateInstance, all eight original GetName
@@ -43,14 +43,32 @@ Held native ITypeInfo remains invocable after unregister, while fresh object
 lookups fail. Tests refuse preexisting sample LIBID/interface/CLSID keys, serialize
 with existing server registration cases, and remove their TypeLib registrations.
 
-This qualifies original **class source and behavior** in the existing test
-image. Original COMMap.cpp/Aggreg.cpp DLL module entry points, their separate
-binary layouts/resources, complete DLL registration/deployment and whole VCXPROJ builds
-remain unqualified. All 37 original pure-ATL applications therefore remain
-not-qualified. Exact Microsoft tear-off member/layout compatibility is also
-separate. Non-Windows cross hosts do not run Windows SDK MIDL and do not count
-as native original-class admission.
+The two existing unload DLLs additionally compile the unchanged COMMap.cpp
+and Aggreg.cpp module entry points with their respective class bodies. The
+original .rc files, including version/string/REGISTRY/TYPELIB resources, are
+copied without byte changes beside the generated native MIDL output. Their
+four original private COM exports are appended to each existing GUI export
+list. Existing GUI unload/callback tests retain their no-COM behavior and
+stdout markers. A separate test-only translation unit selects per-user
+registration metadata before any export is called; it performs no registry
+or COM work during DLL initialization.
 
+After the host's process-local factories and module have retired, the same
+STA events case loads both DLLs and calls their original registration exports.
+Native CoCreateInstance executes all eight routes and registered dispatch
+across both images. Interface vtable allocation bases must match their actual
+DLLs, and each DLL rejects the other one's classes. Tests check real per-user
+class paths and independent TypeLib paths, unregister both while a cached
+tear-off retains the original owner, then retire all interfaces and COM caches
+before FreeLibrary verifies both images are unmapped. Preexisting sample
+CLSID/LIBID/interface/ProgID keys are rejected before installation.
+
+This qualifies original class, module, resource and per-user two-DLL behavior
+inside existing test images. Unchanged VCXPROJ/solution builds, original output
+filenames/export layout, machine-wide deployment and exact Microsoft tear-off
+member/layout compatibility remain separate. All 37 whole original pure-ATL
+applications remain not-qualified. Non-Windows cross hosts do not generate
+Windows SDK MIDL and do not count as original-module admission.
 
 Native MIDL-generated headers additionally receive MinGW UUID template
 bindings derived from their own annotations, reusing the existing Ribbon UUID

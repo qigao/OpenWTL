@@ -1,5 +1,5 @@
 // Native acceptance of unchanged original Microsoft class implementations.
-// The original COMMap/aggreg DLL module entry points are not linked here.
+// Original COMMap/aggreg module entry points also run in two existing DLLs.
 #include "premap.h"
 #include "COMMap.h"
 #include "Outer.h"
@@ -9,6 +9,8 @@
 #include "aggreg/AutoAggB.h"
 #include <cstdio>
 #include <cwchar>
+#include <string>
+#include <utility>
 
 #define ORIGINAL_CLASS_CHECK(x) do { if (!(x)) { \
     std::fprintf(stderr, "MICROSOFT_COMMAP_CLASS_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
@@ -444,8 +446,168 @@ bool OriginalClassBodies() {
     ORIGINAL_CLASS_CHECK(error->GetDescription(&survivingError.m_str) == S_OK && NameIs(survivingError, L"Interface type out of range"));
     return true;
 }
+
+struct OriginalDllImage {
+    using ServerCall = HRESULT (WINAPI*)();
+    using ClassCall = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+    HMODULE image = nullptr;
+    std::wstring path;
+    ServerCall install = nullptr, uninstall = nullptr, canUnload = nullptr;
+    ClassCall getClass = nullptr;
+    bool installed = false;
+    bool Open(const wchar_t* filename) {
+        wchar_t executable[8193]{};
+        const DWORD length = ::GetModuleFileNameW(nullptr, executable, 8193);
+        if (!length || length >= 8193) return false;
+        path.assign(executable, length);
+        const auto slash = path.find_last_of(L"\\/");
+        if (slash == path.npos) return false;
+        path.resize(slash + 1);
+        path += filename;
+        image = ::LoadLibraryW(path.c_str());
+        if (!image) return false;
+        install = reinterpret_cast<ServerCall>(::GetProcAddress(image, "DllRegisterServer"));
+        uninstall = reinterpret_cast<ServerCall>(::GetProcAddress(image, "DllUnregisterServer"));
+        canUnload = reinterpret_cast<ServerCall>(::GetProcAddress(image, "DllCanUnloadNow"));
+        getClass = reinterpret_cast<ClassCall>(::GetProcAddress(image, "DllGetClassObject"));
+        return install && uninstall && canUnload && getClass;
+    }
+    HRESULT Register() {
+        const HRESULT result = install();
+        if (SUCCEEDED(result)) installed = true;
+        return result;
+    }
+    HRESULT Unregister() {
+        const HRESULT result = uninstall();
+        if (SUCCEEDED(result)) installed = false;
+        return result;
+    }
+    bool Close() {
+        if (installed || !image) return false;
+        if (!::FreeLibrary(image)) return false;
+        image = nullptr;
+        return ::GetModuleHandleW(path.c_str()) == nullptr;
+    }
+    ~OriginalDllImage() {
+        if (installed && FAILED(Unregister())) std::terminate();
+        if (image) ::FreeLibrary(image);
+    }
+};
+bool OriginalInterfaceImage(IUnknown* object, HMODULE expected) {
+    MEMORY_BASIC_INFORMATION memory{};
+    // The actual interface vtable must belong to its original DLL, rather
+    // than the host's earlier process-local source-subset implementation.
+    const void* table = *reinterpret_cast<void* const*>(object);
+    return ::VirtualQuery(table, &memory, sizeof(memory)) == sizeof(memory) &&
+        memory.AllocationBase == expected && memory.Type == MEM_IMAGE;
+}
+bool OriginalDllDeployment() {
+    ORIGINAL_CLASS_CHECK(!ATL::_pAtlModule && OriginalTypeLibsAbsent());
+    const wchar_t* progIds[] = {L"COMMap.Outer", L"COMMap.Outer.1", L"COMMap.Chain", L"COMMap.Chain.1",
+        L"Aggreg.Agg", L"Aggreg.Agg.1", L"Aggreg.AggBlind", L"Aggreg.AggBlind.1",
+        L"Aggreg.AutoAgg", L"Aggreg.AutoAgg.1", L"Aggreg.AutoAggB", L"Aggreg.AutoAggB.1"};
+    for (const auto* progId : progIds)
+        ORIGINAL_CLASS_CHECK(RegistryAbsent(HKEY_CLASSES_ROOT, progId));
+    OriginalDllImage aggregates, commap;
+    ORIGINAL_CLASS_CHECK(aggregates.Open(L"openatl_unload_probe.dll"));
+    ORIGINAL_CLASS_CHECK(commap.Open(L"openatl_unload_fixture.dll"));
+    ORIGINAL_CLASS_CHECK(aggregates.canUnload() == S_OK && commap.canUnload() == S_OK);
+    void* wrong = reinterpret_cast<void*>(1);
+    ORIGINAL_CLASS_CHECK(commap.getClass(CLSID_CAgg, IID_IClassFactory, &wrong) == CLASS_E_CLASSNOTAVAILABLE && !wrong);
+    wrong = reinterpret_cast<void*>(1);
+    ORIGINAL_CLASS_CHECK(aggregates.getClass(CLSID_COuter, IID_IClassFactory, &wrong) == CLASS_E_CLASSNOTAVAILABLE && !wrong);
+    {
+        ATL::CComPtr<IClassFactory> factory;
+        ORIGINAL_CLASS_CHECK(commap.getClass(CLSID_COuter, IID_IClassFactory, reinterpret_cast<void**>(&factory.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(commap.canUnload() == S_FALSE);
+        wrong = reinterpret_cast<void*>(1);
+        ORIGINAL_CLASS_CHECK(factory->CreateInstance(nullptr, IID_IOuter, &wrong) == REGDB_E_CLASSNOTREG && !wrong);
+    }
+    ORIGINAL_CLASS_CHECK(commap.canUnload() == S_OK);
+    ORIGINAL_CLASS_CHECK(aggregates.Register() == S_OK && commap.Register() == S_OK);
+    const CLSID* classes[] = {&CLSID_COuter, &CLSID_CChain, &CLSID_CAgg,
+        &CLSID_CAggBlind, &CLSID_CAutoAgg, &CLSID_CAutoAggB};
+    for (size_t n = 0; n < 6; ++n) {
+        const auto key = GuidPath(L"Software\\Classes\\CLSID\\", *classes[n]) + L"\\InprocServer32";
+        ORIGINAL_CLASS_CHECK(RegistryText(HKEY_CURRENT_USER, key, nullptr, n < 2 ? commap.path : aggregates.path));
+        ORIGINAL_CLASS_CHECK(RegistryText(HKEY_CURRENT_USER, key, L"ThreadingModel", L"both"));
+    }
+    for (const auto& pair : {std::make_pair(&LIBID_COMMAPLib, &commap.path),
+                             std::make_pair(&LIBID_AGGREGLib, &aggregates.path)}) {
+        ATL::CComBSTR path;
+        ORIGINAL_CLASS_CHECK(::QueryPathOfRegTypeLib(*pair.first, 1, 0, LOCALE_SYSTEM_DEFAULT, &path.m_str) == S_OK);
+        ORIGINAL_CLASS_CHECK(path.m_str && ::CompareStringOrdinal(path.m_str, -1, pair.second->c_str(), -1, TRUE) == CSTR_EQUAL);
+    }
+    ATL::CComPtr<IOuter> outer;
+    ORIGINAL_CLASS_CHECK(::CoCreateInstance(CLSID_COuter, nullptr, CLSCTX_INPROC_SERVER,
+        IID_IOuter, reinterpret_cast<void**>(&outer.p)) == S_OK);
+    ORIGINAL_CLASS_CHECK(OriginalInterfaceImage(outer.p, commap.image));
+    ORIGINAL_CLASS_CHECK(OriginalRegisteredInfo(outer.p, IID_IOuter, LIBID_COMMAPLib));
+    const wchar_t* names[] = {L"IOuter", L"ITearOff1", L"ITearOff2", L"IChain",
+        L"IAgg", L"IAutoAgg", L"IAggBlind", L"IAutoAggB"};
+    LPOLESTR method = const_cast<LPOLESTR>(L"GetName");
+    DISPID member = DISPID_UNKNOWN;
+    ORIGINAL_CLASS_CHECK(outer->GetIDsOfNames(IID_NULL, &method, 1, LOCALE_SYSTEM_DEFAULT, &member) == S_OK);
+    for (short n = 0; n < 8; ++n) {
+        ATL::CComBSTR direct;
+        ORIGINAL_CLASS_CHECK(outer->GetName(n, &direct.m_str) == S_OK && NameIs(direct, names[n]));
+        VARIANTARG number{}; number.vt = VT_I2; number.iVal = n;
+        DISPPARAMS parameters{&number, nullptr, 1, 0};
+        ATL::CComVariant result;
+        ORIGINAL_CLASS_CHECK(outer->Invoke(member, IID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+            &parameters, &result, nullptr, nullptr) == S_OK && result.vt == VT_BSTR && NameIs(result.bstrVal, names[n]));
+    }
+    ATL::CComPtr<IUnknown> identity;
+    ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK);
+    const IID* interfaces[] = {&IID_IOuter, &IID_ITearOff1, &IID_ITearOff2, &IID_IChain,
+        &IID_IAgg, &IID_IAutoAgg, &IID_IAggBlind, &IID_IAutoAggB};
+    for (size_t n = 0; n < 8; ++n) {
+        ATL::CComPtr<IUnknown> face, canonical;
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(*interfaces[n], reinterpret_cast<void**>(&face.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(OriginalInterfaceImage(face.p, n < 4 ? commap.image : aggregates.image));
+        ORIGINAL_CLASS_CHECK(face->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK && canonical.p == identity.p);
+    }
+    {
+        ATL::CComPtr<IChain> chain;
+        ATL::CComPtr<IAgg> aggregate;
+        ATL::CComPtr<IAggBlind> blind;
+        ATL::CComPtr<IAutoAgg> automatic;
+        ATL::CComPtr<IAutoAggB> automaticBlind;
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IChain, reinterpret_cast<void**>(&chain.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IAgg, reinterpret_cast<void**>(&aggregate.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IAggBlind, reinterpret_cast<void**>(&blind.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IAutoAgg, reinterpret_cast<void**>(&automatic.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_IAutoAggB, reinterpret_cast<void**>(&automaticBlind.p)) == S_OK);
+        ORIGINAL_CLASS_CHECK(OriginalRegisteredProperty(chain.p, IID_IChain, LIBID_COMMAPLib, L"Name2", L"IChain"));
+        ORIGINAL_CLASS_CHECK(OriginalRegisteredProperty(aggregate.p, IID_IAgg, LIBID_AGGREGLib, L"Name", L"IAgg"));
+        ORIGINAL_CLASS_CHECK(OriginalRegisteredProperty(blind.p, IID_IAggBlind, LIBID_AGGREGLib, L"Name", L"IAggBlind"));
+        ORIGINAL_CLASS_CHECK(OriginalRegisteredProperty(automatic.p, IID_IAutoAgg, LIBID_AGGREGLib, L"Name", L"IAutoAgg"));
+        ORIGINAL_CLASS_CHECK(OriginalRegisteredProperty(automaticBlind.p, IID_IAutoAggB, LIBID_AGGREGLib, L"Name", L"IAutoAggB"));
+    }
+    ATL::CComPtr<ITearOff2> cached;
+    ORIGINAL_CLASS_CHECK(outer->QueryInterface(IID_ITearOff2, reinterpret_cast<void**>(&cached.p)) == S_OK);
+    identity.Release(); outer.Release();
+    ORIGINAL_CLASS_CHECK(commap.canUnload() == S_FALSE && aggregates.canUnload() == S_FALSE);
+    ORIGINAL_CLASS_CHECK(commap.Unregister() == S_OK && aggregates.Unregister() == S_OK);
+    ORIGINAL_CLASS_CHECK(OriginalTypeLibsAbsent());
+    for (const auto* progId : progIds)
+        ORIGINAL_CLASS_CHECK(RegistryAbsent(HKEY_CLASSES_ROOT, progId));
+    ATL::CComPtr<IOuter> retained;
+    ORIGINAL_CLASS_CHECK(cached->QueryInterface(IID_IOuter, reinterpret_cast<void**>(&retained.p)) == S_OK);
+    for (short n = 0; n < 8; ++n) {
+        ATL::CComBSTR result;
+        ORIGINAL_CLASS_CHECK(retained->GetName(n, &result.m_str) == S_OK && NameIs(result, names[n]));
+    }
+    ATL::CComPtr<ITypeInfo> missing;
+    ORIGINAL_CLASS_CHECK(retained->GetTypeInfo(0, LOCALE_SYSTEM_DEFAULT, &missing.p) == TYPE_E_LIBNOTREGISTERED && !missing.p);
+    retained.Release(); cached.Release();
+    ::CoFreeUnusedLibrariesEx(0, 0);
+    ORIGINAL_CLASS_CHECK(commap.canUnload() == S_OK && aggregates.canUnload() == S_OK);
+    ORIGINAL_CLASS_CHECK(commap.Close() && aggregates.Close());
+    return true;
+}
 }
 bool RunMicrosoftCommapClassTests() {
     const bool result = OriginalClassBodies();
-    return result && !ATL::_pAtlModule;
+    return result && !ATL::_pAtlModule && OriginalDllDeployment() && !ATL::_pAtlModule;
 }
