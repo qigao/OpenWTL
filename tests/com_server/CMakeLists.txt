@@ -57,8 +57,19 @@ set_target_properties(openatl_com_server_fixture openatl_com_server_tests PROPER
 set(_openatl_commap_original
   "${PROJECT_SOURCE_DIR}/tests/official_samples/microsoft_atl/commap")
 set(_openatl_commap_idl "${_openatl_commap_original}/COMMap.idl")
+# Keep every immutable source/RGS blob on the incremental configure graph.
+file(READ "${_openatl_commap_original}/original_sources.json" _commap_snapshot)
+string(JSON _commap_blob_count LENGTH "${_commap_snapshot}" files)
+math(EXPR _commap_last_blob "${_commap_blob_count} - 1")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${_openatl_commap_idl}")
+  "${_openatl_commap_original}/original_sources.json")
+foreach(_index RANGE 0 ${_commap_last_blob})
+  string(JSON _source MEMBER "${_commap_snapshot}" files ${_index})
+  # Canonical fixtures also occur in _rgs_fixtures; normalize ../ aliases so
+  # Ninja sees each configure input once instead of duplicate output paths.
+  get_filename_component(_source_path "${_openatl_commap_original}/${_source}" ABSOLUTE)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_source_path}")
+endforeach()
 execute_process(COMMAND "${Python3_EXECUTABLE}"
   "${_openatl_commap_original}/check_idl.py" "${_openatl_commap_idl}"
   COMMAND_ERROR_IS_FATAL ANY)
@@ -187,13 +198,14 @@ if(CMAKE_HOST_WIN32)
   # Embed the same real MIDL output in both existing native test images.
   # Target ordering makes the TypeLib available before Windows RC runs.
   set(_openatl_embedded_rc "${CMAKE_CURRENT_BINARY_DIR}/fixture_typelib.rc")
-  file(WRITE "${_openatl_embedded_rc}" "1 TYPELIB \"${_openatl_commap_tlb}\"\n")
+  file(WRITE "${_openatl_embedded_rc}"
+    "1 TYPELIB \"${_openatl_commap_tlb}\"\n2 TYPELIB \"${_openatl_aggreg_generated}/Aggreg.tlb\"\n")
   target_sources(openatl_com_server_fixture PRIVATE
     "${_openatl_embedded_rc}" "${_openatl_commap_iid}")
   target_sources(openatl_com_server_tests PRIVATE
     "${_openatl_embedded_rc}" embedded_dispatch.cpp)
   set_source_files_properties("${_openatl_embedded_rc}" PROPERTIES
-    OBJECT_DEPENDS "${_openatl_commap_tlb}")
+    OBJECT_DEPENDS "${_openatl_commap_tlb};${_openatl_aggreg_generated}/Aggreg.tlb")
   add_dependencies(openatl_com_server_fixture openatl_microsoft_commap_midl)
   target_include_directories(openatl_com_server_fixture PRIVATE
     "${_openatl_commap_generated}")

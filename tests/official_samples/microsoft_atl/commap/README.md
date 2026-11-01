@@ -2,8 +2,9 @@
 
 The snapshot comes from `microsoft/VCSamples@9e1d4475555b76a17a3568369867f1d7b6cc6126`,
 `VC2010Samples/ATL/General/commap`. `original_sources.json` records the exact Git
-blob SHA of all 18 original files: COMMap.idl, Outer/Chain source and headers,
-premap/resource headers, and the nested aggreg classes/headers/Aggreg.idl.
+blob SHA of all 24 original files: COMMap.idl, Outer/Chain source and headers,
+premap/resource headers, the nested aggreg classes/headers/Aggreg.idl, and all
+six RGS scripts. Outer.rgs/Chain.rgs reuse the existing canonical fixtures.
 `check_idl.py` checks every byte before native generation/build. Attributes
 preserve source bytes and original whitespace; the upstream MIT license is
 retained in `../MICROSOFT_LICENSE.txt`.
@@ -22,13 +23,29 @@ classes, actual process-local CoCreateInstance, all eight original GetName
 routes, canonical identity, independent/cached tear-offs, failed and partially
 failed FinalConstruct cleanup, native ITypeInfo::Invoke from the real embedded
 COMMap TypeLib, original Error/IErrorInfo and EXCEPINFO, and retirement after
-class-factory revocation while a cached interface retains the owner. It does
-not write class/TypeLib registry keys. Registered-mode IDispatchImpl is not
-replaced with a file/image provider; the harness explicitly invokes ITypeInfo.
+class-factory revocation while a cached interface retains the owner.
+
+The six original automatic UpdateRegistry callbacks execute through selected
+module RegisterServer/UnregisterServer calls against a unique temporary HKCU
+root. Original resource IDs overlap, so COMMap scripts live in the existing
+ActiveX executable and Aggreg scripts in the existing COM fixture DLL. Tests
+check the actual image paths (including EXE %MODULE% quoting), ProgIDs,
+threading values, duplicate-install
+rejection and reverse cleanup. No globally visible class registration is used.
+
+Both native MIDL TypeLibs are embedded as resources 1 and 2. Public per-user
+AtlRegisterTypeLib/AtlUnRegisterTypeLib calls exercise the unchanged classes'
+registered-mode IDispatchImpl: IOuter GetName across eight routes, IChain and
+four aggregate properties, independent library removal, and missing-library
+errors with no embedded-image fallback. The original TypeLib omits both tear-off
+IIDs, which correctly return TYPE_E_ELEMENTNOTFOUND while COMMap is registered.
+Held native ITypeInfo remains invocable after unregister, while fresh object
+lookups fail. Tests refuse preexisting sample LIBID/interface/CLSID keys, serialize
+with existing server registration cases, and remove their TypeLib registrations.
 
 This qualifies original **class source and behavior** in the existing test
 image. Original COMMap.cpp/Aggreg.cpp DLL module entry points, their separate
-binary layouts/resources, complete registration and whole VCXPROJ deployment
+binary layouts/resources, complete DLL registration/deployment and whole VCXPROJ builds
 remain unqualified. All 37 original pure-ATL applications therefore remain
 not-qualified. Exact Microsoft tear-off member/layout compatibility is also
 separate. Non-Windows cross hosts do not run Windows SDK MIDL and do not count

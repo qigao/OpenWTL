@@ -649,7 +649,7 @@ Automation exceptions or complete original Microsoft application compatibility.
 The existing STA ActiveX events case now builds the unchanged Outer/Chain and
 four nested aggreg class bodies from a byte-pinned Microsoft snapshot. Native
 process-local registration exercises all six logical OBJECT_ENTRY_AUTO classes
-without registry writes. Tests execute the eight original GetName routes,
+without persistent class registration. Tests execute the eight original GetName routes,
 class factories, initial/partial FinalConstruct failure cleanup, specific/blind/
 automatic aggregation, chained canonical identity, ordinary/cached tear-offs,
 explicit native TypeLib Invoke and original rich errors. A cached interface
@@ -658,6 +658,19 @@ retains the owner and module pins after factory revocation until final release.
 Repeated identical object entries from headers coalesce by type/CLSID/callback
 identity. Conflicting registrations remain invalid. No original methods/macros
 are transformed; no test target or mode is added. This does not admit the
-original COMMap.cpp/Aggreg.cpp DLL entry points, separate binary resources,
-registration or complete original project deployment. The original classes
+original COMMap.cpp/Aggreg.cpp DLL entry points, separate original binary
+resources or complete original DLL registration/project deployment. The original classes
 remain single-threaded and are used on the existing STA owner.
+
+
+The existing case also executes the six original RGS callbacks in an isolated
+HKCU root, selecting the existing EXE/DLL resource images for their overlapping
+IDs. It verifies actual paths, ProgIDs, threading values, duplicate-install
+rejection and reverse cleanup. Two embedded MIDL TypeLibs are explicitly
+registered per user through the public ATL helpers. Original registered-mode
+IDispatchImpl executes the eight IOuter routes plus IChain/four aggregate
+properties; independent unregister removes fresh lookup while retained native
+ITypeInfo remains invocable. Missing libraries never fall back to the embedded
+images. Original tear-off IIDs omitted by COMMap.tlb return
+TYPE_E_ELEMENTNOTFOUND while its library is registered. Tests reject preexisting
+sample keys and share the existing COM registration resource lock.

@@ -229,4 +229,10 @@ the existing module duplicate-CLSID validation still rejects conflicts.
 
 The original six class bodies are additionally compiled/executed by the
 existing STA events case; see OFFICIAL_SAMPLES.md. This qualifies their used
-API subset, not original DLL module/resource/registration or full ATL layout.
+API subset, not complete original DLL module/resource/deployment or full ATL
+layout. The same existing case now admits six original RGS callbacks in an
+isolated HKCU root and both real per-user TypeLib registrations. The unchanged
+registered-mode IDispatchImpl executes IOuter/IChain and all four aggregates;
+independent unregister rejects fresh lookups with no image fallback. Original
+tear-off IIDs omitted from the TypeLib remain TYPE_E_ELEMENTNOTFOUND while the
+library is registered. This does not qualify full original DLL deployment.

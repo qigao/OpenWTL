@@ -29,5 +29,12 @@ if(CMAKE_HOST_WIN32)
   # translation unit of this STA test binary on the same ATL type definitions.
   target_compile_definitions(openatl_activex PRIVATE
     _ATL_APARTMENT_THREADED= OPENATL_ORIGINAL_COMMAP_CLASSES=1)
-  add_dependencies(openatl_activex openatl_microsoft_commap_midl)
+  set(_commap_registry_rc "${CMAKE_CURRENT_BINARY_DIR}/original_commap_registry.rc")
+  file(WRITE "${_commap_registry_rc}"
+    "1 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Outer.rgs\"\n2 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Chain.rgs\"\n")
+  target_sources(openatl_activex PRIVATE "${_commap_registry_rc}")
+  set_source_files_properties("${PROJECT_BINARY_DIR}/tests/com_server/fixture_typelib.rc"
+    PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb")
+  add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture)
+  set_tests_properties(openatl.activex_events PROPERTIES RESOURCE_LOCK openatl_com_server_registration)
 endif()
