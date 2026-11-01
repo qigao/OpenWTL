@@ -55,9 +55,16 @@ bool NumericBoundsAndLocks() {
     ARRAY_CHECK(a.CopyFrom(nullptr) == E_POINTER && a.CopyTo(nullptr) == E_POINTER);
     ARRAY_CHECK(a.Destroy() == S_OK && !a.m_psa);
     incoming = ::SafeArrayCreateVector(VT_I4, 0, 2);
-    ARRAY_CHECK(incoming && a.Attach(incoming) == S_OK && !a.IsSizable() && FAILED(a.Resize(3)));
+    ARRAY_CHECK(incoming && a.Attach(incoming) == S_OK);
+    ARRAY_CHECK(a.IsSizable() == !(incoming->fFeatures & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED | FADF_FIXEDSIZE)));
     incoming = a.Detach();
     ARRAY_CHECK(!a.m_psa && incoming->cLocks == 0 && ::SafeArrayDestroy(incoming) == S_OK);
+    ARRAY_CHECK(a.Create(2) == S_OK && a.SetAt(0, 17) == S_OK);
+    a.m_psa->fFeatures |= FADF_FIXEDSIZE;
+    original = a.m_psa;
+    ARRAY_CHECK(!a.IsSizable() && a.Resize(3) == E_INVALIDARG && a.Add(LONG(19)) == E_INVALIDARG);
+    ARRAY_CHECK(a.m_psa == original && a.GetCount() == 2 && a[0] == 17 && original->cLocks == 1);
+    ARRAY_CHECK(a.Destroy() == S_OK);
     ATL::CComSafeArray<LONG> out;
     SAFEARRAYBOUND bound{2, 1};
     *out.GetSafeArrayPtr() = ::SafeArrayCreate(VT_I4, 1, &bound);

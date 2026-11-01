@@ -7,6 +7,11 @@
 #include <olectl.h>
 #include <objsafe.h>
 
+// mingw-w64's objsafe.h declares the IID but omits its C++ __uuidof binding.
+#ifdef __CRT_UUID_DECL
+__CRT_UUID_DECL(IObjectSafety,0xcb5bdc81,0x93c1,0x11cf,0x8f,0x20,0x00,0x80,0x5f,0x2c,0xd0,0x64)
+#endif
+
 namespace ATL {
 template<class T, DWORD SupportedSafety>
 class IObjectSafetyImpl : public IObjectSafety {

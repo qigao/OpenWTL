@@ -221,6 +221,7 @@ public:
         if (!bound) return E_POINTER;
         if (!ValidBound(*bound) || bound->cElements > (std::numeric_limits<size_t>::max)() / sizeof(T)) return E_INVALIDARG;
         if (!m_psa) return Create(bound);
+        if (!IsSizable()) return E_INVALIDARG;
         HRESULT hr = EnsureLocked();
         if (FAILED(hr)) return hr;
         hr = ::SafeArrayUnlock(m_psa);
