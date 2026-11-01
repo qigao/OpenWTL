@@ -3,6 +3,8 @@
 #include <atlhost.h>
 #include <cstdio>
 #include <new>
+#include <cstring>
+#include <thread>
 
 #define REQUIRE(x) do { if (!(x)) { std::fprintf(stderr, "HOST_LIFECYCLE_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
@@ -10,6 +12,257 @@ template<class T> class OwnedWindow : public T {
 public:
     ~OwnedWindow() { if (::IsWindow(this->m_hWnd)) ::DestroyWindow(this->m_hWnd); }
 };
+struct UIObjectState { ULONG refs = 1; int destroyed = 0; };
+class UIObject : public IDispatch, public IDropTarget, public IDataObject,
+                 public IOleCommandTarget, public IOleInPlaceActiveObject {
+public:
+    explicit UIObject(UIObjectState* state = nullptr) : state_(state) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
+        if (!value) return E_POINTER; *value = nullptr;
+        if (iid == IID_IUnknown || iid == IID_IDispatch) *value = static_cast<IDispatch*>(this);
+        else if (iid == IID_IDropTarget) *value = static_cast<IDropTarget*>(this);
+        else if (iid == IID_IDataObject) *value = static_cast<IDataObject*>(this);
+        else if (iid == IID_IOleCommandTarget) *value = static_cast<IOleCommandTarget*>(this);
+        else if (iid == IID_IOleInPlaceActiveObject) *value = static_cast<IOleInPlaceActiveObject*>(this);
+        else return E_NOINTERFACE;
+        AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { ++refs_; if (state_) state_->refs = refs_; return refs_; }
+    ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (state_) state_->refs = n; if (!n) delete this; return n; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS*, VARIANT*, EXCEPINFO*, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject*, DWORD, POINTL, DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DragLeave() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject*, DWORD, POINTL, DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC*, STGMEDIUM*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC*, STGMEDIUM*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC*, STGMEDIUM*, BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD, IEnumFORMATETC**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE QueryStatus(const GUID*, ULONG, OLECMD[], OLECMDTEXT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Exec(const GUID*, DWORD, DWORD, VARIANT*, VARIANT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetWindow(HWND* value) override { if (!value) return E_POINTER; *value = nullptr; return E_FAIL; }
+    HRESULT STDMETHODCALLTYPE ContextSensitiveHelp(BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(LPMSG) override { return S_FALSE; }
+    HRESULT STDMETHODCALLTYPE OnFrameWindowActivate(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDocWindowActivate(BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResizeBorder(LPCRECT, IOleInPlaceUIWindow*, BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE EnableModeless(BOOL) override { return S_OK; }
+private:
+    ~UIObject() { if (state_) ++state_->destroyed; }
+    ULONG refs_ = 1;
+    UIObjectState* state_;
+};
+struct UIState {
+    int calls[15]{}, destroyed = 0, action = 0;
+    bool good = true, inside = false, diedInside = false, omitResult = false, nullResult = false;
+    bool wrongInterface = false, nullGroup = false, browser = false, destroyOnRetain = false;
+    HRESULT transport = S_OK, result = S_FALSE;
+    IAxWinHostWindow* host = nullptr;
+    IDocHostUIHandlerDispatch* replacement = nullptr;
+    UIObject* object = nullptr;
+    IUnknown* frame = nullptr;
+    HWND window = nullptr;
+    MSG message{};
+};
+class UIHandler : public IDocHostUIHandlerDispatch {
+public:
+    explicit UIHandler(UIState& state) : state_(state) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
+        if (!value) return E_POINTER; *value = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IDispatch && iid != __uuidof(IDocHostUIHandlerDispatch)) return E_NOINTERFACE;
+        *value = static_cast<IDocHostUIHandlerDispatch*>(this); AddRef(); return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        ++refs_;
+        if (state_.destroyOnRetain) { state_.destroyOnRetain = false; ::DestroyWindow(state_.window); }
+        return refs_;
+    }
+    ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* count) override { if (!count) return E_POINTER; *count = 0; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS*, VARIANT*, EXCEPINFO*, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE ShowContextMenu(DWORD id, DWORD x, DWORD y, IUnknown* command, IDispatch* reserved, HRESULT* result) override {
+        ++state_.calls[0];
+        state_.good = state_.browser || (id == CONTEXT_MENU_TEXTSELECT && x == static_cast<DWORD>(-19) && y == 27 &&
+            command == static_cast<IDispatch*>(state_.object) && reserved == static_cast<IDispatch*>(state_.object) && state_.good);
+        return Result(result);
+    }
+    HRESULT STDMETHODCALLTYPE GetHostInfo(DWORD* flags, DWORD* click) override {
+        ++state_.calls[1];
+        if (!state_.browser) {
+            state_.good = state_.good && *flags == DOCHOSTUIFLAG_NO3DBORDER && *click == DOCHOSTUIDBLCLK_DEFAULT;
+            *flags |= docHostUIFlagDIALOG; *click = docHostUIDblClkSHOWCODE;
+        }
+        return state_.transport;
+    }
+    HRESULT STDMETHODCALLTYPE ShowUI(DWORD id, IUnknown* active, IUnknown* target, IUnknown* frame, IUnknown* document, HRESULT* result) override {
+        ++state_.calls[2];
+        if (!state_.browser) state_.good = state_.good && id == 77 &&
+            active == static_cast<IOleInPlaceActiveObject*>(state_.object) && target == static_cast<IOleCommandTarget*>(state_.object) &&
+            frame == state_.frame && document == state_.frame;
+        return Result(result);
+    }
+    HRESULT STDMETHODCALLTYPE HideUI() override {
+        auto& state = state_; ++state.calls[3]; state.inside = true;
+        const int action = state.action; state.action = 0;
+        if (action == 1 || action == 2) state.good = state.host->SetExternalUIHandler(action == 1 ? nullptr : state.replacement) == S_OK && state.good;
+        else if (action == 3) state.good = ::DestroyWindow(state.window) && state.good;
+        state.inside = false; return state.transport;
+    }
+    HRESULT STDMETHODCALLTYPE UpdateUI() override { ++state_.calls[4]; return state_.transport; }
+    HRESULT STDMETHODCALLTYPE EnableModeless(VARIANT_BOOL enable) override { ++state_.calls[5]; state_.good = state_.good && (state_.browser || enable == VARIANT_TRUE); return state_.transport; }
+    HRESULT STDMETHODCALLTYPE OnDocWindowActivate(VARIANT_BOOL active) override { ++state_.calls[6]; state_.good = state_.good && (state_.browser || active == VARIANT_TRUE); return state_.transport; }
+    HRESULT STDMETHODCALLTYPE OnFrameWindowActivate(VARIANT_BOOL active) override { ++state_.calls[7]; state_.good = state_.good && (state_.browser || active == VARIANT_FALSE); return state_.transport; }
+    HRESULT STDMETHODCALLTYPE ResizeBorder(long left, long top, long right, long bottom, IUnknown* window, VARIANT_BOOL frame) override {
+        ++state_.calls[8]; state_.good = state_.good && (state_.browser ||
+            (left == -2 && top == 3 && right == 19 && bottom == 29 && window == state_.frame && frame == VARIANT_TRUE));
+        return state_.transport;
+    }
+    HRESULT STDMETHODCALLTYPE TranslateAccelerator(DWORD_PTR window, DWORD message, DWORD_PTR w, DWORD_PTR l, BSTR group, DWORD id, HRESULT* result) override {
+        ++state_.calls[9];
+        if (!state_.browser) state_.good = state_.good && window == reinterpret_cast<DWORD_PTR>(state_.message.hwnd) &&
+            message == state_.message.message && w == state_.message.wParam && l == static_cast<DWORD_PTR>(state_.message.lParam) && id == 99 &&
+            (state_.nullGroup ? !group : group && !::wcscmp(group, L"{00020400-0000-0000-C000-000000000046}"));
+        return Result(result);
+    }
+    HRESULT STDMETHODCALLTYPE GetOptionKeyPath(BSTR* value, DWORD flags) override {
+        ++state_.calls[10]; if (!state_.browser) state_.good = state_.good && flags == 123;
+        *value = state_.nullResult || state_.browser ? nullptr : ::SysAllocStringLen(L"key\0tail", 8);
+        return state_.browser ? S_FALSE : state_.transport;
+    }
+    HRESULT STDMETHODCALLTYPE GetDropTarget(IUnknown* original, IUnknown** output) override {
+        ++state_.calls[11]; if (!state_.browser) state_.good = state_.good && original == static_cast<IDropTarget*>(state_.object);
+        return Object(output);
+    }
+    HRESULT STDMETHODCALLTYPE GetExternal(IDispatch** output) override {
+        ++state_.calls[12]; *output = state_.nullResult ? nullptr : static_cast<IDispatch*>(state_.object);
+        if (*output) (*output)->AddRef(); return state_.transport;
+    }
+    HRESULT STDMETHODCALLTYPE TranslateUrl(DWORD flags, BSTR input, BSTR* output) override {
+        ++state_.calls[13]; if (!state_.browser) state_.good = state_.good && flags == 17 && input && !::wcscmp(input, L"about:blank#\u6771");
+        *output = state_.nullResult || state_.browser ? nullptr : ::SysAllocString(L"about:blank#\u4eac");
+        return state_.browser ? S_FALSE : state_.transport;
+    }
+    HRESULT STDMETHODCALLTYPE FilterDataObject(IUnknown* original, IUnknown** output) override {
+        ++state_.calls[14]; if (!state_.browser) state_.good = state_.good && original == static_cast<IDataObject*>(state_.object);
+        return Object(output);
+    }
+private:
+    HRESULT Result(HRESULT* result) { if (!state_.omitResult) *result = state_.result; return state_.transport; }
+    HRESULT Object(IUnknown** output) {
+        *output = state_.nullResult || state_.browser ? nullptr : state_.wrongInterface ?
+            static_cast<IDocHostUIHandlerDispatch*>(this) : static_cast<IDispatch*>(state_.object);
+        if (*output) (*output)->AddRef(); return state_.browser ? E_NOTIMPL : state_.transport;
+    }
+    ~UIHandler() { ++state_.destroyed; state_.diedInside = state_.inside; }
+    ULONG refs_ = 1;
+    UIState& state_;
+};
+bool uiHandlers() {
+    ATL::CAtlModule module;
+    {
+        UIState state; UIObjectState objects;
+        OwnedWindow<ATL::CAxWindow> window;
+        RECT rect{0,0,100,100}; REQUIRE(window.Create(nullptr, &rect, nullptr, WS_POPUP));
+        ATL::CComPtr<IAxWinHostWindow> host; REQUIRE(window.QueryHost(&host) == S_OK);
+        ATL::CComPtr<IDocHostUIHandler> ui; REQUIRE(window.QueryHost(&ui) == S_OK);
+        ATL::CComPtr<IAxWinAmbientDispatch> ambient; REQUIRE(window.QueryHost(&ambient) == S_OK);
+        ATL::CComPtr<IOleInPlaceFrame> frame; REQUIRE(window.QueryHost(&frame) == S_OK);
+        state.frame = frame; state.host = host; state.window = window;
+        ATL::CComPtr<UIObject> object; object.Attach(new UIObject(&objects)); state.object = object;
+        REQUIRE(window.SetExternalDispatch(object) == S_OK && window.SetExternalDispatch(object) == S_OK && objects.refs == 2);
+        ATL::CComPtr<IDispatch> external;
+        REQUIRE(ui->GetExternal(&external) == S_OK && external.p == static_cast<IDispatch*>(object.p)); external.Release();
+        ATL::CComPtr<IDocHostUIHandlerDispatch> handler; handler.Attach(new UIHandler(state));
+        ATL::CComPtr<IDocHostUIHandler> unsupported;
+        REQUIRE(handler->QueryInterface(IID_IDocHostUIHandler, reinterpret_cast<void**>(&unsupported)) == E_NOINTERFACE && !unsupported);
+        REQUIRE(window.SetExternalUIHandler(handler) == S_OK);
+        REQUIRE(ambient->put_DocHostFlags(DOCHOSTUIFLAG_NO3DBORDER) == S_OK);
+        DOCHOSTUIINFO info{}; REQUIRE(ui->GetHostInfo(&info) == S_OK && info.cbSize == sizeof(info) &&
+            info.dwFlags == (DOCHOSTUIFLAG_NO3DBORDER | DOCHOSTUIFLAG_DIALOG) && info.dwDoubleClick == DOCHOSTUIDBLCLK_SHOWCODE && !info.pchHostCss && !info.pchHostNS);
+        POINT point{-19,27}; REQUIRE(ui->ShowContextMenu(CONTEXT_MENU_TEXTSELECT, &point, static_cast<IDispatch*>(object.p), object) == S_FALSE);
+        state.result = S_OK; REQUIRE(ui->ShowContextMenu(CONTEXT_MENU_TEXTSELECT, &point, static_cast<IDispatch*>(object.p), object) == S_OK);
+        REQUIRE(ui->ShowUI(77, object, object, frame, frame) == S_OK);
+        REQUIRE(ui->HideUI() == S_OK && ui->UpdateUI() == S_OK && ui->EnableModeless(42) == S_OK &&
+            ui->OnDocWindowActivate(2) == S_OK && ui->OnFrameWindowActivate(FALSE) == S_OK);
+        RECT border{-2,3,19,29}; REQUIRE(ui->ResizeBorder(&border, frame, 2) == S_OK);
+        state.message.hwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(0x12345678abcdef12ULL));
+        state.message.message = WM_KEYDOWN; state.message.wParam = static_cast<WPARAM>(0xfedcba9876543210ULL);
+        state.message.lParam = static_cast<LPARAM>(-123456789);
+        REQUIRE(ui->TranslateAccelerator(&state.message, &IID_IDispatch, 99) == S_OK);
+        state.nullGroup = true; state.omitResult = true;
+        REQUIRE(ui->TranslateAccelerator(&state.message, nullptr, 99) == S_FALSE);
+        REQUIRE(ui->ShowContextMenu(CONTEXT_MENU_TEXTSELECT, &point, static_cast<IDispatch*>(object.p), object) == S_FALSE);
+        REQUIRE(ui->ShowUI(77, object, object, frame, frame) == S_FALSE); state.omitResult = false;
+        LPOLESTR text = nullptr;
+        REQUIRE(ui->GetOptionKeyPath(&text, 123) == S_OK && text && !std::memcmp(text, L"key\0tail", 9 * sizeof(WCHAR))); ::CoTaskMemFree(text);
+        WCHAR url[] = L"about:blank#\u6771";
+        REQUIRE(ui->TranslateUrl(17, url, &text) == S_OK && text && !::wcscmp(text, L"about:blank#\u4eac")); ::CoTaskMemFree(text);
+        ATL::CComPtr<IDropTarget> target; REQUIRE(ui->GetDropTarget(object, &target) == S_OK && target.p == static_cast<IDropTarget*>(object.p)); target.Release();
+        ATL::CComPtr<IDataObject> data; REQUIRE(ui->FilterDataObject(object, &data) == S_OK && data.p == static_cast<IDataObject*>(object.p)); data.Release();
+        REQUIRE(ui->GetExternal(&external) == S_OK && external.p == static_cast<IDispatch*>(object.p)); external.Release();
+        for (int calls : state.calls) REQUIRE(calls > 0);
+        REQUIRE(objects.refs == 2 && state.good);
+        state.wrongInterface = true;
+        REQUIRE(ui->GetDropTarget(object, &target) == E_NOINTERFACE && !target);
+        REQUIRE(ui->FilterDataObject(object, &data) == E_NOINTERFACE && !data); state.wrongInterface = false;
+        state.transport = E_ACCESSDENIED;
+        REQUIRE(ui->ShowContextMenu(CONTEXT_MENU_TEXTSELECT, &point, static_cast<IDispatch*>(object.p), object) == E_ACCESSDENIED);
+        REQUIRE(ui->ShowUI(77, object, object, frame, frame) == E_ACCESSDENIED &&
+            ui->TranslateAccelerator(&state.message, nullptr, 99) == E_ACCESSDENIED);
+        REQUIRE(ui->GetOptionKeyPath(&text, 123) == E_ACCESSDENIED && !text);
+        REQUIRE(ui->TranslateUrl(17, url, &text) == E_ACCESSDENIED && !text);
+        REQUIRE(ui->GetDropTarget(object, &target) == E_ACCESSDENIED && !target);
+        REQUIRE(ui->FilterDataObject(object, &data) == E_ACCESSDENIED && !data);
+        REQUIRE(ui->GetExternal(&external) == E_ACCESSDENIED && !external && objects.refs == 2);
+        state.transport = S_FALSE; state.nullResult = true;
+        REQUIRE(ui->GetOptionKeyPath(&text, 123) == S_FALSE && !text && ui->TranslateUrl(17, url, &text) == S_FALSE && !text);
+        REQUIRE(ui->GetDropTarget(object, &target) == S_FALSE && !target && ui->FilterDataObject(object, &data) == S_FALSE && !data);
+        REQUIRE(ui->GetExternal(&external) == S_FALSE && !external);
+        REQUIRE(ui->GetHostInfo(nullptr) == E_POINTER && ui->ShowContextMenu(0, nullptr, nullptr, nullptr) == E_POINTER &&
+            ui->ResizeBorder(nullptr, nullptr, FALSE) == E_POINTER && ui->TranslateAccelerator(nullptr, nullptr, 0) == E_POINTER);
+        REQUIRE(ui->GetOptionKeyPath(nullptr, 0) == E_POINTER && ui->TranslateUrl(0, nullptr, nullptr) == E_POINTER &&
+            ui->GetDropTarget(nullptr, nullptr) == E_POINTER && ui->FilterDataObject(nullptr, nullptr) == E_POINTER && ui->GetExternal(nullptr) == E_POINTER);
+        HRESULT foreignUI = S_OK, foreignObject = S_OK;
+        std::thread foreign([&] { foreignUI = host->SetExternalUIHandler(handler); foreignObject = host->SetExternalDispatch(object); }); foreign.join();
+        REQUIRE(foreignUI == RPC_E_WRONG_THREAD && foreignObject == RPC_E_WRONG_THREAD);
+        REQUIRE(window.SetExternalUIHandler(nullptr) == S_OK);
+        REQUIRE(ui->GetExternal(&external) == S_OK && external.p == static_cast<IDispatch*>(object.p)); external.Release();
+        REQUIRE(window.SetExternalDispatch(nullptr) == S_OK);
+        handler.Release(); REQUIRE(state.destroyed == 1 && state.good && !state.diedInside && objects.refs == 1);
+        object.Release(); REQUIRE(objects.destroyed == 1 && objects.refs == 0);
+    }
+    REQUIRE(module.GetLockCount() == 0);
+    for (int action = 1; action <= 4; ++action) {
+        UIState state, replacement;
+        OwnedWindow<ATL::CAxWindow> window;
+        RECT rect{0,0,100,100}; REQUIRE(window.Create(nullptr, &rect, nullptr, WS_POPUP));
+        ATL::CComPtr<IAxWinHostWindow> host; REQUIRE(window.QueryHost(&host) == S_OK);
+        ATL::CComPtr<IDocHostUIHandler> ui; REQUIRE(window.QueryHost(&ui) == S_OK);
+        state.host = host; state.window = window; state.action = action;
+        ATL::CComPtr<IDocHostUIHandlerDispatch> next; next.Attach(new UIHandler(replacement)); state.replacement = next;
+        auto handler = new UIHandler(state);
+        if (action == 4) state.destroyOnRetain = true;
+        REQUIRE(window.SetExternalUIHandler(handler) == (action == 4 ? CO_E_OBJNOTCONNECTED : S_OK)); handler->Release();
+        if (action != 4) REQUIRE(ui->HideUI() == S_OK);
+        if (action == 3) REQUIRE(state.destroyed == 0 && host->SetExternalUIHandler(next) == CO_E_OBJNOTCONNECTED);
+        REQUIRE(host->SetExternalUIHandler(nullptr) == S_OK);
+        REQUIRE(state.good && state.destroyed == 1 && !state.diedInside);
+        next.Release(); REQUIRE(replacement.destroyed == 1);
+        if (action >= 3) { REQUIRE(!::IsWindow(window)); window.m_hWnd = nullptr; }
+    }
+    REQUIRE(module.GetLockCount() == 0);
+    return true;
+}
 struct ControlState {
     CLSID classId{};
     bool siteFirst = true, initInterface = true, failInit = false, destroyDuringInit = false;
@@ -465,5 +718,25 @@ bool RunHostLifecycleTests() {
     const bool created = creation();
     const bool active = accelerators();
     const bool resources = resourceInitialization();
-    return created && active && resources;
+    const bool ui = uiHandlers();
+    return created && active && resources && ui;
+}
+bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
+    UIState state; state.browser = true;
+    ATL::CComPtr<UIObject> object; object.Attach(new UIObject); state.object = object;
+    ATL::CComPtr<IDocHostUIHandlerDispatch> handler; handler.Attach(new UIHandler(state));
+    ATL::CComPtr<IAxWinHostWindow> host; REQUIRE(window.QueryHost(&host) == S_OK);
+    struct Reset {
+        IAxWinHostWindow* host;
+        ~Reset() { host->SetExternalUIHandler(nullptr); }
+    } reset{host}; // Clear before the borrowed fixture state leaves scope, including failures.
+    REQUIRE(window.SetExternalUIHandler(handler) == S_OK);
+    ATL::CComPtr<IHTMLWindow2> script; REQUIRE(document->get_parentWindow(&script) == S_OK && script);
+    ATL::CComPtr<IDispatch> external; REQUIRE(script->get_external(&external) == S_OK);
+    ATL::CComPtr<IUnknown> expected, actual;
+    REQUIRE(object->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&expected)) == S_OK);
+    REQUIRE(external && external->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&actual)) == S_OK && actual == expected);
+    REQUIRE(state.calls[12] > 0 && window.SetExternalUIHandler(nullptr) == S_OK);
+    handler.Release(); REQUIRE(state.destroyed == 1 && !state.diedInside);
+    return true;
 }
