@@ -504,6 +504,8 @@ inline DWORD AxDialogError(HRESULT hr) noexcept {
     if (hr == E_POINTER || hr == E_INVALIDARG) return ERROR_INVALID_PARAMETER;
     return ERROR_GEN_FAILURE;
 }
+template<class T, class = void> struct HasAxSinkMap : std::false_type {};
+template<class T> struct HasAxSinkMap<T, std::void_t<decltype(T::_GetSinkMap())>> : std::true_type {};
 }
 inline HWND WINAPI AtlAxCreateDialog(HINSTANCE instance, LPCWSTR name, HWND parent,
     DLGPROC procedure, LPARAM parameter) noexcept {
@@ -624,7 +626,7 @@ class CAxDialogImpl : public CDialogImplBaseT<TBase> {
 public:
     int GetIDD() noexcept { return static_cast<T*>(this)->IDD; }
     HRESULT AdviseSinkMap(bool advise) noexcept {
-        if constexpr (requires { T::_GetSinkMap(); }) return AtlAdviseSinkMap(static_cast<T*>(this), advise);
+        if constexpr (detail::HasAxSinkMap<T>::value) return AtlAdviseSinkMap(static_cast<T*>(this), advise);
         else return S_OK; // An owner without a sink map has no event entries.
     }
     HWND Create(HWND parent, LPARAM parameter = 0) noexcept {
