@@ -9,6 +9,10 @@
 #include "openatl/atl_dispatch.h"
 #include <ocidl.h>  // IObjectWithSite, native COM interface
 #include <optional>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 namespace ATL {
 
@@ -201,6 +205,57 @@ inline HRESULT AtlObjectException() noexcept {
     catch (...) { return E_UNEXPECTED; }
 }
 } // namespace detail
+
+// Source property-map metadata. Its representation is repository-owned; it
+// is not a serialized format or a Microsoft ATL binary-layout contract.
+struct _ATL_PROP_ENTRY {
+    LPCOLESTR szDesc;
+    DISPID dispid;
+    const CLSID* pclsidPropPage;
+    const IID* piidDispatch;
+    DWORD dwOffsetData;
+    DWORD dwSizeData;
+    VARTYPE vt;
+};
+namespace detail {
+inline bool PropertyMapEnd(const _ATL_PROP_ENTRY& entry) noexcept {
+    return !entry.szDesc && !entry.dispid && !entry.pclsidPropPage && !entry.piidDispatch &&
+        !entry.dwOffsetData && !entry.dwSizeData && entry.vt == VT_EMPTY;
+}
+template<std::size_t Offset, std::size_t Size>
+constexpr _ATL_PROP_ENTRY PropertyDataEntry(LPCOLESTR description, VARTYPE type) noexcept {
+    static_assert(Offset <= MAXDWORD && Size <= MAXDWORD, "Property data exceeds the ATL offset/size range");
+    return {description, 0, nullptr, nullptr, static_cast<DWORD>(Offset), static_cast<DWORD>(Size), type};
+}
+}
+template<class T>
+class ATL_NO_VTABLE ISpecifyPropertyPagesImpl : public ISpecifyPropertyPages {
+public:
+    HRESULT STDMETHODCALLTYPE GetPages(CAUUID* output) override {
+        if (!output) return E_POINTER;
+        *output = {};
+        try {
+            const _ATL_PROP_ENTRY* map = T::GetPropertyMap();
+            if (!map) return E_UNEXPECTED;
+            std::vector<CLSID> pages;
+            for (const auto* entry = map; !detail::PropertyMapEnd(*entry); ++entry) {
+                if (!entry->pclsidPropPage || *entry->pclsidPropPage == CLSID_NULL) continue;
+                bool duplicate = false;
+                for (const auto& page : pages) if (page == *entry->pclsidPropPage) { duplicate = true; break; }
+                if (!duplicate) pages.push_back(*entry->pclsidPropPage);
+            }
+            if (pages.empty()) return S_OK;
+            if (pages.size() > (std::numeric_limits<ULONG>::max)() ||
+                pages.size() > (std::numeric_limits<SIZE_T>::max)() / sizeof(CLSID)) return E_OUTOFMEMORY;
+            const SIZE_T bytes = pages.size() * sizeof(CLSID);
+            auto copy = static_cast<CLSID*>(::CoTaskMemAlloc(bytes));
+            if (!copy) return E_OUTOFMEMORY;
+            std::memcpy(copy, pages.data(), bytes);
+            output->pElems = copy; output->cElems = static_cast<ULONG>(pages.size());
+            return S_OK;
+        } catch (...) { return detail::AtlObjectException(); }
+    }
+};
 
 template<class Base>
 class CComObject : private detail::AtlObjectModulePin, public Base {
@@ -830,6 +885,31 @@ HRESULT QueryAutoAggregate(Owner* owner, CComPtr<IUnknown>& cache, REFCLSID clsi
 }
 } // namespace detail
 } // namespace ATL
+
+// Property declarations expose metadata to the native page-list helper. No
+// persistence, object activation or COM initialization occurs in these maps.
+#define BEGIN_PROP_MAP(theClass) \
+public: \
+    using _PropMapClass = theClass; \
+    static ::ATL::_ATL_PROP_ENTRY* GetPropertyMap() noexcept { \
+        static ::ATL::_ATL_PROP_ENTRY entries[] = {
+#define END_PROP_MAP() \
+            {} \
+        }; \
+        return entries; \
+    }
+#define PROP_ENTRY_TYPE_EX(description, member, clsid, iid, type) \
+    { OLESTR(description), (member), &(clsid), &(iid), 0, 0, (type) },
+#define PROP_ENTRY_TYPE(description, member, clsid, type) \
+    PROP_ENTRY_TYPE_EX(description, member, clsid, IID_IDispatch, type)
+#define PROP_ENTRY_EX(description, member, clsid, iid) \
+    PROP_ENTRY_TYPE_EX(description, member, clsid, iid, VT_EMPTY)
+#define PROP_ENTRY(description, member, clsid) \
+    PROP_ENTRY_TYPE(description, member, clsid, VT_EMPTY)
+#define PROP_PAGE(clsid) \
+    { nullptr, 0, &(clsid), nullptr, 0, 0, VT_EMPTY },
+#define PROP_DATA_ENTRY(description, member, type) \
+    ::ATL::detail::PropertyDataEntry<offsetof(_PropMapClass, member), sizeof(((_PropMapClass*)nullptr)->member)>(OLESTR(description), type),
 
 // Maps use real typed casts, including pointer adjustment for multiple
 // inheritance. The first simple entry defines the canonical IUnknown.

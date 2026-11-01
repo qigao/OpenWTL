@@ -115,7 +115,13 @@ retains the host/control, rejects recursive display and creation-time calls,
 checks retirement after external calls and releases native page-list/title
 allocations on every exit. An absent page interface propagates E_NOINTERFACE;
 an empty list returns E_NOTIMPL so the control can choose its own UI.
-The full ATL property-page class/property-map framework remains unfinished.
+`ISpecifyPropertyPagesImpl` and source property-map declarations supply the page
+list from PROP_PAGE/PROP_ENTRY_TYPE metadata, deduplicating page CLSIDs in their
+first-declaration order and ignoring CLSID_NULL. Each call returns an independent
+CoTaskMem array; headers/static maps do not initialize COM. PROP_DATA_ENTRY records
+member offset/size/type metadata. The full ATL property-page classes and map-driven
+persistence/browsing remain unfinished; declaring a map alone does not save data.
+See [property-map scope](ATL_COMPATIBILITY.md#property-map-page-discovery).
 See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
