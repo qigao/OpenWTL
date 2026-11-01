@@ -9,7 +9,7 @@ DLL module exports and `OBJECT_ENTRY_AUTO` class discovery exist. A class
 can now supply its own real `UpdateRegistry(BOOL)` callback to participate
 in deterministic automatic DLL registration; the callback is not inferred
 from the CLSID. Bounded RGS resources, per-user type-library registration,
-basic aggregation and tear-offs have implemented subsets. Automatic aggregates,
+basic/automatic aggregation and tear-offs have implemented subsets. CComPolyObject,
 full RGS/registration semantics and the complete ATL COM Server API remain gaps.
 
 For conventional ATL object declarations, `atlcom.h` supplies the
@@ -554,8 +554,8 @@ exercise direct factory creation without COM initialization and native
 CoCreateInstance aggregation after installation, then verify real methods,
 canonical identity, reference retirement, DllCanUnloadNow and unload.
 
-This basic aggregation milestone does not implement automatic aggregates,
-CComPolyObject, arbitrary custom factory policies or the whole
+This basic aggregation milestone does not qualify CComPolyObject,
+arbitrary custom factory policies or the whole
 original COMMap application. It introduces no second factory provider or test
 entry point, and no printer/hardware-HSP CI requirement.
 
@@ -589,6 +589,35 @@ No original Microsoft application is thereby marked qualified.
 m_pOwner deliberately stores the actual Owner*; the exact Microsoft
 CComObject<Owner>* member type and layout remain unqualified. See
 ATL_COMPATIBILITY.md for the typed-owner and construction-lock contracts.
-Automatic aggregates, CComPolyObject, full original COMMap admission and
+CComPolyObject, full original COMMap admission and
 arbitrary custom factories remain separate work. Hardware HSP and printer
 CI remain retired.
+
+
+## Automatic aggregate COM-map entries
+
+COM_INTERFACE_ENTRY_AUTOAGGREGATE and its BLIND form lazily activate a native
+in-process class with the controlling outer and IID_IUnknown. The owner holds
+one private inner reference and releases it during FinalRelease; public inner
+interfaces retain the owner. A successful activation is cached even when the
+requested interface is absent. Activation failures keep a null slot and may
+retry. Blind entries continue to later map entries after any failure; specific
+entries return the failure. Existing explicit AGGREGATE_BLIND entries follow
+the same failed-query fallthrough rule.
+
+Existing core cases prove absent-COM failure without implicit initialization,
+prepopulated slots without activation and explicit blind failure fallthrough.
+The existing native STA/MTA cases register an actual process-local class
+factory through the same Module engine and exercise raw/CComPtr slots,
+specific/blind/chained maps, exact QI reference ownership, missing-interface
+cache retention, activation HRESULTs/exceptions/allocation failures and retry,
+recursive creation rejection, nested controlling owners and module pinning
+after factory revocation. The MTA case checks eight-thread first creation.
+The same cases also auto-aggregate the real registered DLL class, call its
+methods and prove owner retention and DLL unload after the last public release.
+No test entry, target, workflow or printer/hardware probe is added.
+
+The caller owns COM startup and apartment/marshalling policy. Construction
+uses the owner's lock and bounded recursion guard; see ATL_COMPATIBILITY.md
+for its reentrancy, blocking-hook and slot replacement contracts. This does
+not qualify remote aggregation or the complete original COMMap project.

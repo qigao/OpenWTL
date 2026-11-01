@@ -36,7 +36,8 @@ target. Missing standard headers and APIs remain compatibility gaps; see the
 | `CComCoClass<T, &CLSID>`, `CComCreator<Object>`, `CComCreator2` | Default aggregatable creator selection, CLSID accessor, owned local creation and class-declared nonaggregated/aggregate-only policies. Explicit CComCreator<CComObject<T>> remains nonaggregated. |
 | `CComContainedObject<T>`, `CComAggObject<T>` | Delegating contained interfaces and separate nondelegating inner IUnknown, zero-ref raw creation, construction failure cleanup and module pins through contained destruction. The outer identity is borrowed, not retained cyclically. |
 | `DECLARE_AGGREGATABLE`, `DECLARE_NOT_AGGREGATABLE`, `DECLARE_ONLY_AGGREGATABLE` | Built-in creator policies honored by direct CComCoClass creation and OBJECT_ENTRY_AUTO factories; aggregate factory creation requires IID_IUnknown. Custom factory policies and CComPolyObject remain unqualified. |
-| `COM_INTERFACE_ENTRY_AGGREGATE`, `COM_INTERFACE_ENTRY_AGGREGATE_BLIND` | Delegate to an explicitly owned inner IUnknown, preserve the outer canonical identity and one owning QI reference, including through chained maps. Automatic aggregate creation remains pending. |
+| `COM_INTERFACE_ENTRY_AGGREGATE`, `COM_INTERFACE_ENTRY_AGGREGATE_BLIND` | Delegate to an explicitly owned inner IUnknown, preserve the outer canonical identity and one owning QI reference, including through chained maps. |
+| `COM_INTERFACE_ENTRY_AUTOAGGREGATE`, `COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND` | Lazy native in-process CoCreateInstance with the controlling outer and IID_IUnknown. Serialized slot creation, activation failure/retry, retained inner after an unsupported IID, same-slot reentrancy rejection and blind fallback through the map. Caller initializes COM and releases the private slot in FinalRelease. |
 | `CComTearOffObjectBase`, `CComTearOffObject`, `CComCachedTearOffObject` | Ordinary tear-offs retain the owner until their own last release; cached private IUnknown is owner-held and public interfaces retain the controlling owner. Supports ordinary and aggregated owner subobjects without layout casts. See the typed-owner limitation below. |
 | `COM_INTERFACE_ENTRY_TEAR_OFF`, `COM_INTERFACE_ENTRY_CACHED_TEAR_OFF` | Lazy ordinary instances and serialized cached publication, one QI reference and canonical owner identity, construction failures/retry and same-entry reentrancy rejection. Cached slots must be released by the owner's FinalRelease. |
 | `DECLARE_GET_CONTROLLING_UNKNOWN`, `OuterQueryInterface` / `OuterAddRef` / `OuterRelease` | Explicit outer identity access/delegation; no automatic COM initialization. |
@@ -115,8 +116,7 @@ IChain implementation uses standard 0xffff/0xffff dispatch for real property
 Invoke in STA/MTA. This is original-IDL and embedded-dispatch admission, not
 the whole original COMMap DLL build/link or any of the 37 pure-ATL projects passing.
 
-**Tracked compatibility gaps:** automatic aggregate creation,
-CComPolyObject, exact Microsoft tear-off member/layout contracts and custom factory policies,
+**Tracked compatibility gaps:** CComPolyObject, exact Microsoft tear-off member/layout contracts and custom factory policies,
 full RGS grammar and standalone registrar APIs, complete CAtlComModule/legacy TypeLib API coverage and machine-wide registration acceptance,
 connection-point server templates, SAFEARRAY wrappers, windowless
 hosting, resource-based ActiveX dialogs and complete control/server support.
@@ -163,3 +163,23 @@ fail E_UNEXPECTED before a second allocation (maximum nested construction
 depth 64); failures leave a null cache so later requests can retry. Owners
 release the private cached IUnknown during FinalRelease after external calls
 retire. Concurrent manual replacement of the cache slot is not supported.
+
+
+## Automatic aggregate activation
+
+Auto-aggregate map entries use native CoCreateInstance with CLSCTX_INPROC_SERVER,
+the outer controlling IUnknown and IID_IUnknown. They do not initialize COM or
+substitute a local creator when activation fails. A populated IUnknown* or
+CComPtr<IUnknown> slot is reused. Successful activation publishes one private
+reference before the requested QI; a missing interface therefore leaves the
+inner cached, while failed activation leaves the slot null for a later retry.
+
+The owner's lock serializes initialization and QI; external calls must retain
+the owner, SingleThreadModel use must be serialized, and activation hooks must
+not wait on another thread blocked on that owner lock. Same-thread recursive
+creation of the same slot fails E_UNEXPECTED before another activation, using
+the same bounded construction guard as tear-offs. The owner releases the slot
+in FinalRelease. Concurrent manual slot replacement is outside the contract.
+Specific entries propagate failures; blind entries continue through the map
+after any failed activation/interface query. IUnknown never triggers lazy
+creation and always remains the owner's canonical identity.

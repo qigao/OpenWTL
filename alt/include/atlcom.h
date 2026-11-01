@@ -592,6 +592,36 @@ inline HRESULT QueryAggregate(IUnknown* inner, REFIID iid, void** output,
     owned = true;
     return S_OK;
 }
+template<class Owner>
+HRESULT QueryAutoAggregate(Owner* owner, IUnknown*& cache, REFCLSID clsid,
+                           REFIID iid, void** output, bool& owned) noexcept {
+    *output = nullptr;
+    auto* identity = owner->GetControllingUnknown();
+    if (!identity) return E_UNEXPECTED;
+    // Keep the owner alive until after its lock is dropped. The private
+    // inner unknown itself borrows the controlling identity, avoiding cycles.
+    CComPtr<IUnknown> protect(identity);
+    TearOffOwnerLock<Owner> lock(*owner);
+    if (!cache) {
+        // The cache slot identifies this lazy entry even through chained maps.
+        TearOffConstruction constructing(identity, &cache);
+        if (!constructing.active) return E_UNEXPECTED;
+        CComPtr<IUnknown> created;
+        const HRESULT hr = ::CoCreateInstance(clsid, identity, CLSCTX_INPROC_SERVER,
+            IID_IUnknown, reinterpret_cast<void**>(&created.p));
+        if (FAILED(hr)) return hr;
+        if (hr != S_OK || !created.p) return E_UNEXPECTED;
+        // Successful activation owns the cache even if the requested interface
+        // is missing. Activation failures leave a null slot and may retry.
+        cache = created.Detach();
+    }
+    return QueryAggregate(cache, iid, output, owned);
+}
+template<class Owner>
+HRESULT QueryAutoAggregate(Owner* owner, CComPtr<IUnknown>& cache, REFCLSID clsid,
+                           REFIID iid, void** output, bool& owned) noexcept {
+    return QueryAutoAggregate(owner, cache.p, clsid, iid, output, owned);
+}
 } // namespace detail
 } // namespace ATL
 
@@ -661,7 +691,16 @@ public: \
     if (!IsEqualIID(iid, IID_IUnknown)) { \
         const HRESULT _atlAggregateHr = \
             ::ATL::detail::QueryAggregate(this->member, iid, output, owned); \
-        if (_atlAggregateHr != E_NOINTERFACE) return _atlAggregateHr; \
+        if (_atlAggregateHr == S_OK) return S_OK; \
+    }
+#define COM_INTERFACE_ENTRY_AUTOAGGREGATE(id, member, clsid) \
+    if (!IsEqualIID(iid, IID_IUnknown) && IsEqualIID(iid, id)) \
+        return ::ATL::detail::QueryAutoAggregate(this, this->member, clsid, iid, output, owned);
+#define COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND(member, clsid) \
+    if (!IsEqualIID(iid, IID_IUnknown)) { \
+        const HRESULT _atlAggregateHr = \
+            ::ATL::detail::QueryAutoAggregate(this, this->member, clsid, iid, output, owned); \
+        if (_atlAggregateHr == S_OK) return S_OK; \
     }
 #define COM_INTERFACE_ENTRY_TEAR_OFF(id, type) \
     if (!IsEqualIID(iid, IID_IUnknown) && IsEqualIID(iid, id)) \

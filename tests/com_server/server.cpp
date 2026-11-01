@@ -27,6 +27,7 @@ using namespace OpenATL::COM;
     return false; } } while (0)
 
 bool RunAtlCompatibilityTests();
+bool RunAtlAutoAggregateTests(bool multiThreaded);
 bool RunAtlDispatchTests();
 bool RunAtlModuleTests();
 int RunAtlModuleServer(const char* token, bool apartment);
@@ -430,6 +431,49 @@ bool aggregateDll(Dll& dll, bool nativeCom) {
     factory.Release();
     if (nativeCom) ::CoFreeUnusedLibrariesEx(0, 0);
     REQUIRE(dll.unload() == S_OK && outer.refs == 1);
+    return true;
+}
+
+class DllAutoAggregateOwner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IPersist {
+public:
+    ATL::CComPtr<IUnknown> inner;
+    void FinalRelease() noexcept { inner.Release(); }
+    BEGIN_COM_MAP(DllAutoAggregateOwner)
+        COM_INTERFACE_ENTRY(IPersist)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_OpenATLValue, inner.p, CLSID_OpenATLValue)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND(inner.p, CLSID_OpenATLValue)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = CLSID_NULL;
+        return S_OK;
+    }
+};
+bool autoAggregateDll(Dll& dll) {
+    ATL::CComObject<DllAutoAggregateOwner>* owner = nullptr;
+    REQUIRE(ATL::CComObject<DllAutoAggregateOwner>::CreateInstance(&owner) == S_OK && owner->AddRef() == 1);
+    ATL::CComPtr<IUnknown> identity;
+    REQUIRE(owner->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && !owner->inner.p);
+    identity.Release();
+    ATL::CComPtr<IOpenATLValue> value;
+    REQUIRE(owner->QueryInterface(IID_OpenATLValue, reinterpret_cast<void**>(&value.p)) == S_OK && owner->inner.p);
+    IUnknown* cached = owner->inner.p;
+    ATL::CComPtr<IOpenATLSecond> second;
+    REQUIRE(value->QueryInterface(IID_OpenATLSecond, reinterpret_cast<void**>(&second.p)) == S_OK && owner->inner.p == cached);
+    REQUIRE(second->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == owner->GetUnknown());
+    identity.Release();
+    void* missing = reinterpret_cast<void*>(1);
+    REQUIRE(owner->QueryInterface(IID_IStream, &missing) == E_NOINTERFACE && !missing && owner->inner.p == cached);
+    REQUIRE(owner->AddRef() == 4 && owner->Release() == 3);
+    LONG result = 0;
+    REQUIRE(value->GetValue(&result) == S_OK && result == 42);
+    REQUIRE(owner->Release() == 2);
+    ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_FALSE);
+    REQUIRE(second->GetSecond(&result) == S_OK && result == 17);
+    second.Release(); value.Release();
+    ::CoFreeUnusedLibrariesEx(0, 0);
+    REQUIRE(dll.unload() == S_OK);
     return true;
 }
 
@@ -1609,6 +1653,8 @@ bool native(DWORD apartment) {
     REQUIRE(initialized == S_OK);
     struct ApartmentOwner { ~ApartmentOwner() { ::CoUninitialize(); } } owner;
     REQUIRE(aggregateDll(dll, true));
+    REQUIRE(RunAtlAutoAggregateTests(apartment == COINIT_MULTITHREADED));
+    REQUIRE(autoAggregateDll(dll));
 #if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
     REQUIRE(embeddedDispatch(dll));
     REQUIRE(embeddedDispatch(dll, "OpenATLCreateRegisteredDispatch"));

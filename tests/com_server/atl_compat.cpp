@@ -370,6 +370,296 @@ bool Aggregation() {
     return true;
 }
 
+inline constexpr CLSID autoAggregateClassId = {0xf9cb25e4, 0x2573, 0x4af4,
+    {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
+std::atomic<int> autoAttempts{0}, autoLive{0}, autoFinalized{0}, autoFailure{0};
+std::atomic<bool> autoValid{true};
+OpenATL::COM::Module* autoModule = nullptr;
+class AutoInner : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                  public ATL::CComCoClass<AutoInner, &autoAggregateClassId>, public IPersist {
+public:
+    AutoInner() {
+        if (autoFailure == 4) throw std::bad_alloc();
+        ++autoLive;
+    }
+    ~AutoInner() {
+        if (autoModule && autoModule->CanUnloadNow() != S_FALSE) autoValid = false;
+        --autoLive;
+    }
+    HRESULT FinalConstruct() {
+        if (autoFailure == 2) return E_ABORT;
+        if (autoFailure == 3) throw std::runtime_error("automatic aggregate FinalConstruct");
+        if (autoFailure == 5) {
+            void* recursive = reinterpret_cast<void*>(1);
+            const HRESULT hr = GetControllingUnknown()->QueryInterface(IID_IPersist, &recursive);
+            return hr == E_UNEXPECTED && !recursive ? hr : E_FAIL;
+        }
+        return S_OK;
+    }
+    void FinalRelease() noexcept { ++autoFinalized; }
+    BEGIN_COM_MAP(AutoInner)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = autoAggregateClassId;
+        return S_OK;
+    }
+};
+HRESULT CreateAutoInner(OpenATL::COM::Module& module, IUnknown* outer,
+                        REFIID iid, void** output) noexcept {
+    ++autoAttempts;
+    if (!outer || !IsEqualIID(iid, IID_IUnknown)) {
+        autoValid = false;
+        if (output) *output = nullptr;
+        return E_INVALIDARG;
+    }
+    if (autoFailure == 1) { *output = nullptr; return E_ACCESSDENIED; }
+    return ATL::detail::AutoClassCreator<AutoInner>::CreateInstance(module, outer, iid, output);
+}
+class AutoSpecific : public AggregateMap {
+public:
+    void FinalRelease() noexcept { inner.Release(); }
+    BEGIN_COM_MAP(AutoSpecific)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_IPersist, inner.p, autoAggregateClassId)
+    END_COM_MAP()
+};
+class AutoChained : public AutoSpecific {
+public:
+    BEGIN_COM_MAP(AutoChained)
+        COM_INTERFACE_ENTRY_CHAIN(AutoSpecific)
+    END_COM_MAP()
+};
+class AutoFirstMissing : public AutoSpecific {
+public:
+    BEGIN_COM_MAP(AutoFirstMissing)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_IStream, inner, autoAggregateClassId)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_IPersist, inner, autoAggregateClassId)
+    END_COM_MAP()
+};
+class AutoBlind : public AutoSpecific, public IPersist {
+public:
+    BEGIN_COM_MAP(AutoBlind)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE_BLIND(inner, autoAggregateClassId)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* output) override {
+        if (!output) return E_POINTER;
+        *output = classId; // Distinguish the fallback from the actual inner.
+        return S_OK;
+    }
+};
+class AutoSpecificFallback : public AutoBlind {
+public:
+    BEGIN_COM_MAP(AutoSpecificFallback)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AUTOAGGREGATE(IID_IPersist, inner, autoAggregateClassId)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+};
+
+class ExplicitBlindFallback : public AutoBlind {
+public:
+    BEGIN_COM_MAP(ExplicitBlindFallback)
+        COM_INTERFACE_ENTRY(IClassFactory)
+        COM_INTERFACE_ENTRY_AGGREGATE_BLIND(inner)
+        COM_INTERFACE_ENTRY(IPersist)
+    END_COM_MAP()
+};
+class RejectingInner : public IUnknown {
+public:
+    ULONG refs = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr; return E_ACCESSDENIED;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+};
+
+bool AutoAggregateWithoutCom() {
+    ATL::CComObject<AutoSpecific>* object = nullptr;
+    CHECK(ATL::CComObject<AutoSpecific>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+    void* output = reinterpret_cast<void*>(1);
+    CHECK(object->QueryInterface(IID_IPersist, &output) == CO_E_NOTINITIALIZED && !output && !object->inner.p);
+    CHECK(object->QueryInterface(IID_IPersist, nullptr) == E_POINTER);
+    CHECK(object->AddRef() == 2 && object->Release() == 1);
+    // A supplied private inner is reused even without COM initialization;
+    // the macro must never activate or replace a populated slot.
+    CHECK(AggregateValue::CreateInstance(object->GetControllingUnknown(), IID_IUnknown,
+        reinterpret_cast<void**>(&object->inner.p)) == S_OK);
+    ATL::CComPtr<IPersist> value;
+    CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK);
+    CLSID id{};
+    CHECK(value->GetClassID(&id) == S_OK && IsEqualCLSID(id, aggregateClassId));
+    value.Release();
+    CHECK(object->Release() == 0 && aggregateLive == 0);
+    RejectingInner rejecting;
+    ATL::CComObject<ExplicitBlindFallback>* blind = nullptr;
+    CHECK(ATL::CComObject<ExplicitBlindFallback>::CreateInstance(&blind) == S_OK && blind->AddRef() == 1);
+    blind->inner = &rejecting;
+    CHECK(blind->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK);
+    CHECK(value->GetClassID(&id) == S_OK && IsEqualCLSID(id, classId));
+    CHECK(blind->QueryInterface(IID_IStream, &output) == E_NOINTERFACE && !output);
+    value.Release(); CHECK(blind->Release() == 0 && rejecting.refs == 1);
+    ULONG_PTR token = 0;
+    CHECK(::CoGetContextToken(&token) == CO_E_NOTINITIALIZED);
+    return true;
+}
+
+template<class Owner> bool AutoAggregateIdentity() {
+    ATL::CComObject<Owner>* object = nullptr;
+    CHECK(ATL::CComObject<Owner>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+    const int before = autoAttempts;
+    ATL::CComPtr<IUnknown> canonical;
+    CHECK(object->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK &&
+        canonical.p == object->GetUnknown() && !object->inner.p && autoAttempts == before);
+    canonical.Release();
+    ATL::CComPtr<IPersist> first, repeated;
+    CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&first.p)) == S_OK);
+    CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&repeated.p)) == S_OK && repeated.p == first.p);
+    CHECK(autoAttempts == before + 1 && autoLive == 1 && object->inner.p);
+    CHECK(object->AddRef() == 4 && object->Release() == 3); // Exactly one ref per QI.
+    CHECK(first->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&canonical.p)) == S_OK &&
+        canonical.p == object->GetUnknown());
+    canonical.Release();
+    ATL::CComPtr<IUnknown> privateIdentity;
+    CHECK(object->inner->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&privateIdentity.p)) == S_OK &&
+        privateIdentity.p == object->inner.p && privateIdentity.p != object->GetUnknown());
+    privateIdentity.Release();
+    CHECK(object->Release() == 2); // Public inner interfaces now own the owner.
+    CLSID id{};
+    CHECK(first->GetClassID(&id) == S_OK && IsEqualCLSID(id, autoAggregateClassId));
+    repeated.Release(); first.Release();
+    CHECK(autoLive == 0 && autoValid);
+    return true;
+}
+
+bool AutoAggregateNative(bool multiThreaded) {
+    const OpenATL::COM::ClassEntry entry{autoAggregateClassId, nullptr, &CreateAutoInner};
+    OpenATL::COM::Module module(&entry, 1);
+    autoModule = &module;
+    struct Reset { ~Reset() { autoModule = nullptr; autoFailure = 0; } } reset;
+    ATL::CComPtr<IClassFactory> factory;
+    CHECK(module.GetClassObject(autoAggregateClassId, IID_IClassFactory,
+        reinterpret_cast<void**>(&factory.p)) == S_OK);
+    struct Registration {
+        DWORD cookie = 0;
+        ~Registration() { if (cookie) ::CoRevokeClassObject(cookie); }
+        HRESULT Revoke() { HRESULT hr = ::CoRevokeClassObject(cookie); if (SUCCEEDED(hr)) cookie = 0; return hr; }
+    } registration;
+    CHECK(::CoRegisterClassObject(autoAggregateClassId, factory.p, CLSCTX_INPROC_SERVER,
+        REGCLS_MULTIPLEUSE, &registration.cookie) == S_OK);
+    CHECK(AutoAggregateIdentity<AutoSpecific>());
+    CHECK(AutoAggregateIdentity<AutoChained>());
+    CHECK(AutoAggregateIdentity<AutoBlind>());
+    {
+        ATL::CComObject<AutoSpecific>* object = nullptr;
+        CHECK(ATL::CComObject<AutoSpecific>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+        const HRESULT errors[] = {S_OK, E_ACCESSDENIED, E_ABORT, E_UNEXPECTED, E_OUTOFMEMORY, E_UNEXPECTED};
+        for (int mode = 1; mode <= 5; ++mode) {
+            const int before = autoAttempts, finalized = autoFinalized;
+            autoFailure = mode;
+            void* output = reinterpret_cast<void*>(1);
+            CHECK(object->QueryInterface(IID_IPersist, &output) == errors[mode] && !output && !object->inner.p);
+            CHECK(autoAttempts == before + 1 && autoLive == 0 &&
+                autoFinalized == finalized + (mode == 1 || mode == 4 ? 0 : 1));
+            CHECK(object->AddRef() == 2 && object->Release() == 1);
+            autoFailure = 0;
+            ATL::CComPtr<IPersist> retry;
+            CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&retry.p)) == S_OK && autoLive == 1);
+            retry.Release(); object->inner.Release(); // Externally owned, no concurrent users.
+        }
+        CHECK(object->Release() == 0 && autoLive == 0);
+    }
+    {
+        ATL::CComObject<AutoFirstMissing>* object = nullptr;
+        CHECK(ATL::CComObject<AutoFirstMissing>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+        const int before = autoAttempts;
+        void* output = reinterpret_cast<void*>(1);
+        CHECK(object->QueryInterface(IID_IStream, &output) == E_NOINTERFACE && !output && object->inner.p);
+        CHECK(autoAttempts == before + 1 && autoLive == 1 && object->AddRef() == 2 && object->Release() == 1);
+        ATL::CComPtr<IPersist> value;
+        CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK && autoAttempts == before + 1);
+        CHECK(object->QueryInterface(IID_IStream, &output) == E_NOINTERFACE && !output && autoAttempts == before + 1);
+        value.Release(); CHECK(object->Release() == 0 && autoLive == 0);
+    }
+    {
+        ATL::CComObject<AutoBlind>* object = nullptr;
+        CHECK(ATL::CComObject<AutoBlind>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+        autoFailure = 1;
+        ATL::CComPtr<IPersist> fallback;
+        CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&fallback.p)) == S_OK && !object->inner.p);
+        CLSID id{};
+        CHECK(fallback->GetClassID(&id) == S_OK && IsEqualCLSID(id, classId));
+        fallback.Release();
+        void* output = reinterpret_cast<void*>(1);
+        CHECK(object->QueryInterface(IID_IStream, &output) == E_NOINTERFACE && !output && !object->inner.p);
+        ATL::CComObject<AutoSpecificFallback>* specific = nullptr;
+        CHECK(ATL::CComObject<AutoSpecificFallback>::CreateInstance(&specific) == S_OK && specific->AddRef() == 1);
+        CHECK(specific->QueryInterface(IID_IPersist, &output) == E_ACCESSDENIED && !output && !specific->inner.p);
+        CHECK(specific->Release() == 0);
+        autoFailure = 0;
+        CHECK(object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&fallback.p)) == S_OK && object->inner.p);
+        CHECK(fallback->GetClassID(&id) == S_OK && IsEqualCLSID(id, autoAggregateClassId));
+        fallback.Release(); CHECK(object->Release() == 0 && autoLive == 0);
+    }
+    {
+        AggregateOuter outer;
+        ATL::CComAggObject<AutoSpecific>* contained = nullptr;
+        CHECK(ATL::CComAggObject<AutoSpecific>::CreateInstance(&outer, &contained) == S_OK && contained->AddRef() == 1);
+        outer.inner.Attach(contained);
+        ATL::CComPtr<IPersist> value;
+        CHECK(outer.QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK);
+        ATL::CComPtr<IUnknown> identity;
+        CHECK(value->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity.p)) == S_OK && identity.p == &outer);
+        identity.Release(); value.Release();
+        CHECK(outer.refs == 1);
+        outer.inner.Release(); CHECK(autoLive == 0);
+    }
+    if (multiThreaded) {
+        ATL::CComObject<AutoSpecific>* object = nullptr;
+        CHECK(ATL::CComObject<AutoSpecific>::CreateInstance(&object) == S_OK && object->AddRef() == 1);
+        const int before = autoAttempts;
+        std::atomic<void*> selected{nullptr};
+        std::atomic<bool> good{true};
+        std::vector<std::thread> workers;
+        for (int n = 0; n < 8; ++n) workers.emplace_back([&] {
+            const HRESULT initialized = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (FAILED(initialized)) { good = false; return; }
+            for (int i = 0; i < 100; ++i) {
+                ATL::CComPtr<IPersist> value;
+                if (object->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) != S_OK || !value.p) {
+                    good = false; continue;
+                }
+                void* expected = nullptr;
+                if (!selected.compare_exchange_strong(expected, value.p) && expected != value.p) good = false;
+                CLSID id{};
+                if (value->GetClassID(&id) != S_OK || !IsEqualCLSID(id, autoAggregateClassId)) good = false;
+            }
+            ::CoUninitialize();
+        });
+        for (auto& worker : workers) worker.join();
+        CHECK(good && autoAttempts == before + 1 && autoLive == 1);
+        CHECK(object->Release() == 0 && autoLive == 0);
+    }
+    // Retire the registered factory before releasing the last public inner
+    // interface: only the actual inner allocation now pins the module.
+    ATL::CComObject<AutoSpecific>* retained = nullptr;
+    CHECK(ATL::CComObject<AutoSpecific>::CreateInstance(&retained) == S_OK && retained->AddRef() == 1);
+    ATL::CComPtr<IPersist> value;
+    CHECK(retained->QueryInterface(IID_IPersist, reinterpret_cast<void**>(&value.p)) == S_OK);
+    CHECK(registration.Revoke() == S_OK);
+    factory.Release();
+    CHECK(module.CanUnloadNow() == S_FALSE && retained->Release() == 1);
+    value.Release();
+    CHECK(autoLive == 0 && autoValid && module.CanUnloadNow() == S_OK);
+    return true;
+}
+
 inline constexpr IID iidOrdinaryTear = {0xf9cb25e1, 0x2573, 0x4af4,
     {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
 inline constexpr IID iidCachedTear = {0xf9cb25e2, 0x2573, 0x4af4,
@@ -585,6 +875,7 @@ public:
 bool RunAtlCompatibilityTests() {
     CHECK(ComMapChain());
     CHECK(Aggregation());
+    CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());
     using Object = ATL::CComObject<Compatible>;
@@ -664,4 +955,9 @@ bool RunAtlCompatibilityTests() {
     observedModule = nullptr;
     CHECK(pinnedDuringDestruction);
     return true;
+}
+
+// Called only by the existing native STA/MTA entry points after COM startup.
+bool RunAtlAutoAggregateTests(bool multiThreaded) {
+    return AutoAggregateNative(multiThreaded);
 }
