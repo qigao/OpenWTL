@@ -859,8 +859,34 @@ bool CreateStoredObject(StorageState& state, ATL::CComPtr<IPersistStorage>& outp
     REQUIRE(object->QueryInterface(IID_IPersistStorage, reinterpret_cast<void**>(&output)) == S_OK);
     object->Release(); state.owner = output; return true;
 }
+// Observe COM lifetime only; every storage operation still executes in Windows.
+class StorageMonitor : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IStorage {
+public:
+    ATL::CComPtr<IStorage> native;
+    int* destroyed = nullptr;
+    ~StorageMonitor() { if (destroyed) ++*destroyed; }
+    BEGIN_COM_MAP(StorageMonitor)
+        COM_INTERFACE_ENTRY(IStorage)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE CreateStream(const OLECHAR* name, DWORD mode, DWORD a, DWORD b, IStream** out) override { return native->CreateStream(name,mode,a,b,out); }
+    HRESULT STDMETHODCALLTYPE OpenStream(const OLECHAR* name, void* a, DWORD mode, DWORD b, IStream** out) override { return native->OpenStream(name,a,mode,b,out); }
+    HRESULT STDMETHODCALLTYPE CreateStorage(const OLECHAR* name, DWORD mode, DWORD a, DWORD b, IStorage** out) override { return native->CreateStorage(name,mode,a,b,out); }
+    HRESULT STDMETHODCALLTYPE OpenStorage(const OLECHAR* name, IStorage* priority, DWORD mode, SNB exclude, DWORD reserved, IStorage** out) override { return native->OpenStorage(name,priority,mode,exclude,reserved,out); }
+    HRESULT STDMETHODCALLTYPE CopyTo(DWORD count, const IID* ids, SNB exclude, IStorage* out) override { return native->CopyTo(count,ids,exclude,out); }
+    HRESULT STDMETHODCALLTYPE MoveElementTo(const OLECHAR* name, IStorage* target, const OLECHAR* to, DWORD flags) override { return native->MoveElementTo(name,target,to,flags); }
+    HRESULT STDMETHODCALLTYPE Commit(DWORD flags) override { return native->Commit(flags); }
+    HRESULT STDMETHODCALLTYPE Revert() override { return native->Revert(); }
+    HRESULT STDMETHODCALLTYPE EnumElements(DWORD a, void* b, DWORD c, IEnumSTATSTG** out) override { return native->EnumElements(a,b,c,out); }
+    HRESULT STDMETHODCALLTYPE DestroyElement(const OLECHAR* name) override { return native->DestroyElement(name); }
+    HRESULT STDMETHODCALLTYPE RenameElement(const OLECHAR* name, const OLECHAR* to) override { return native->RenameElement(name,to); }
+    HRESULT STDMETHODCALLTYPE SetElementTimes(const OLECHAR* name, const FILETIME* a, const FILETIME* b, const FILETIME* c) override { return native->SetElementTimes(name,a,b,c); }
+    HRESULT STDMETHODCALLTYPE SetClass(REFCLSID id) override { return native->SetClass(id); }
+    HRESULT STDMETHODCALLTYPE SetStateBits(DWORD bits, DWORD mask) override { return native->SetStateBits(bits,mask); }
+    HRESULT STDMETHODCALLTYPE Stat(STATSTG* info, DWORD flags) override { return native->Stat(info,flags); }
+};
 bool storagePersistence() {
     ATL::CAtlModule module;
+    int mediumDestroyed = 0;
     StorageState source, target;
     ATL::CComPtr<IPersistStorage> save, load;
     REQUIRE(CreateStoredObject(source, save) && CreateStoredObject(target, load));
@@ -876,6 +902,10 @@ bool storagePersistence() {
     REQUIRE(::CreateILockBytesOnHGlobal(nullptr, TRUE, &bytes) == S_OK);
     ATL::CComPtr<IStorage> storage;
     REQUIRE(::StgCreateDocfileOnILockBytes(bytes, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE | STGM_TRANSACTED, 0, &storage) == S_OK);
+    ATL::CComObject<StorageMonitor>* monitor = nullptr;
+    REQUIRE(ATL::CComObject<StorageMonitor>::CreateInstance(&monitor) == S_OK && monitor);
+    monitor->native.Attach(storage.Detach()); monitor->destroyed = &mediumDestroyed;
+    monitor->AddRef(); storage.Attach(monitor);
     REQUIRE(save->InitNew(storage) == S_OK && save->InitNew(storage) == CO_E_ALREADYINITIALIZED && source.initializedCalls == 2);
     ATL::CComPtr<IStream> sibling;
     REQUIRE(storage->CreateStream(L"Sibling", STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, 0, &sibling) == S_OK);
@@ -918,7 +948,8 @@ bool storagePersistence() {
     source.failure = 0;
     REQUIRE(save->Save(storage, TRUE) == S_OK && load->Load(storage) == S_OK && target.payload == source.payload);
     REQUIRE(storage->Commit(STGC_DEFAULT) == S_OK); storage.Release();
-    // Both COM objects remain alive: reopening proves no storage/stream cache survived.
+    REQUIRE(mediumDestroyed == 1); // Both objects are alive; no adapter holds this supplied medium.
+    // HGLOBAL does not guarantee cross-instance region locks; this is a byte round trip.
     ATL::CComPtr<IStorage> readOnly;
     REQUIRE(::StgOpenStorageOnILockBytes(bytes, nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, nullptr, 0, &readOnly) == S_OK);
     REQUIRE(load->Load(readOnly) == S_OK && target.payload == source.payload);

@@ -770,9 +770,13 @@ transacted compound storage. They cover adjusted COM pointers/identity,
 InitNew and duplicate initialization, missing Contents, round trips, dirty/copy
 flags, replacement truncation, sibling preservation, native OleSave/class metadata,
 Revert proving no implicit Commit, caller Commit/reopen, read-only denial before
-codec Save, absent/malformed QI, codec HRESULTs/exceptions and retry. Reopening
-exclusive storage while both objects remain alive proves no medium/stream cache;
-a codec callback dropping the last outside reference verifies call lifetime.
+codec Save, absent/malformed QI, codec HRESULTs/exceptions and retry. A COM lifetime
+observer forwards every IStorage operation to Windows; its destruction while
+both objects remain alive proves no reference to the supplied medium survived.
+Contents reopening checks released stream handles. HGLOBAL-backed storage
+reopening is a byte round trip, not proof of cross-instance sharing locks, which
+depend on the ILockBytes implementation. A codec callback dropping the last
+outside object reference verifies call lifetime.
 The existing lifecycle executable/mode, timeout, stdout/stderr and workflows
 remain unchanged. All 36 pinned blobs and 37 whole-application admission gates
 remain intact; real printing/hardware HSP remain excluded from CI.
@@ -780,6 +784,7 @@ remain intact; real printing/hardware HSP remain excluded from CI.
 References: [IPersistStorageImpl](https://learn.microsoft.com/en-us/cpp/atl/reference/ipersiststorageimpl-class),
 [native Save responsibilities](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-save),
 [native CreateStream replacement](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-istorage-createstream),
+[ILockBytes sharing limits](https://learn.microsoft.com/en-us/windows/win32/api/coml2api/nf-coml2api-stgopenstorageonilockbytes),
 [full SaveCompleted lifecycle](https://learn.microsoft.com/en-us/windows/win32/api/objidl/nf-objidl-ipersiststorage-savecompleted).
 
 ## Native property frames
