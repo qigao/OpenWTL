@@ -1253,7 +1253,9 @@ IPropertyPage2Impl::EditProperty returning E_NOTIMPL is the standard ATL default
 not an unfinished framework algorithm. Generic code cannot infer a mapping from
 an application's DISPID to its HWND. The native page fixture now supplies a
 business override that stores preactivation requests and focuses one of two edit
-controls when active. Existing lifecycle cases call Windows
+controls when active. The business override posts WM_NEXTDLGCTL instead of
+synchronously sending it during frame initialization, so native initial focus
+assignment does not overwrite the request. Existing lifecycle cases call Windows
 OleCreatePropertyFrameIndirect with two different initial DISPIDs. Windows owns
 IPerPropertyBrowsing mapping, IPropertyPage2 discovery and EditProperty dispatch;
 the case checks the selected field's actual focus and real Apply versus Cancel,

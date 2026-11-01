@@ -290,7 +290,7 @@ struct PropertyState {
     bool useMap = false;
     bool selectProperty = false, selectedFocus = false;
     DISPID selectedProperty = DISPID_UNKNOWN;
-    int selections = 0;
+    int selections = 0, focusObserved = -1;
     int queried = 0, captions = 0, created = 0, destroyed = 0, sites = 0, clearedSites = 0;
     int bound = 0, unbound = 0, activated = 0, deactivated = 0, shown = 0, applied = 0, nested = 0;
     LONG value = 9;
@@ -649,8 +649,12 @@ private:
     HRESULT FocusRequestedProperty() {
         const HWND field = ::GetDlgItem(m_hWnd,requested_ == 1 ? 771 : 772);
         if (!field) return E_UNEXPECTED;
-        ::SendMessageW(m_hWnd,WM_NEXTDLGCTL,reinterpret_cast<WPARAM>(field),TRUE);
-        return S_OK;
+        // OleCreatePropertyFrameIndirect calls EditProperty during dialog
+        // setup, which also assigns its initial focus. Queue the documented
+        // dialog focus request so that assignment cannot overwrite it.
+        if (::PostMessageW(m_hWnd,WM_NEXTDLGCTL,reinterpret_cast<WPARAM>(field),TRUE)) return S_OK;
+        const DWORD error = ::GetLastError();
+        return error ? HRESULT_FROM_WIN32(error) : E_FAIL;
     }
     static void CALLBACK EditTimer(HWND window, UINT, UINT_PTR id, DWORD) {
         ::KillTimer(window, id);
@@ -661,6 +665,7 @@ private:
         ATL::CComPtr<IPropertyPage> protect(this);
         if (state_.selectProperty) {
             ::SetActiveWindow(::GetAncestor(m_hWnd,GA_ROOT));
+            state_.focusObserved = ::GetDlgCtrlID(::GetFocus());
             state_.selectedFocus = requested_ != DISPID_UNKNOWN &&
                 ::GetFocus() == ::GetDlgItem(m_hWnd,requested_ == 1 ? 771 : 772);
             state_.good = state_.selectedFocus && state_.good;
@@ -842,8 +847,8 @@ bool propertyFrames() {
         REQUIRE(::OleCreatePropertyFrameIndirect(&parameters) == S_OK);
         if (!properties.good || !properties.selectedFocus || properties.selections <= 0 ||
             properties.selectedProperty != member)
-            std::fprintf(stderr,"PROPERTY_FRAME_SELECTION member=%ld selected=%ld calls=%d focus=%d good=%d\n",
-                member,properties.selectedProperty,properties.selections,properties.selectedFocus,properties.good);
+            std::fprintf(stderr,"PROPERTY_FRAME_SELECTION member=%ld selected=%ld calls=%d focus=%d actual_control=%d good=%d\n",
+                member,properties.selectedProperty,properties.selections,properties.selectedFocus,properties.focusObserved,properties.good);
         REQUIRE(properties.good && properties.selectedFocus && properties.selections > 0 &&
             properties.selectedProperty == member);
         REQUIRE(properties.created > 0 && properties.created == properties.destroyed &&
