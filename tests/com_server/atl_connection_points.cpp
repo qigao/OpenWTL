@@ -74,10 +74,27 @@ public:
     END_CONNECTION_POINT_MAP()
     STDMETHOD(Advise)(IUnknown* sink, DWORD* cookie) override {
         ++advises;
-        if (fail) { if (cookie) *cookie = 99; throw ATL::CAtlException(E_ACCESSDENIED); }
+        if (fail) { if (cookie) *cookie = 99; return E_ACCESSDENIED; }
         return Point::Advise(sink, cookie);
     }
     STDMETHOD(Unadvise)(DWORD cookie) override { ++unadvises; return Point::Unadvise(cookie); }
+};
+// STDMETHOD includes the MinGW SDK's nothrow attribute. Exercise exception
+// translation with an explicitly throwing C++ override, not that COM macro.
+class ThrowingOverrideSource : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                               public ATL::IConnectionPointContainerImpl<ThrowingOverrideSource>,
+                               public ATL::IConnectionPointImpl<ThrowingOverrideSource, &EventsIID> {
+public:
+    BEGIN_COM_MAP(ThrowingOverrideSource)
+        COM_INTERFACE_ENTRY(IConnectionPointContainer)
+    END_COM_MAP()
+    BEGIN_CONNECTION_POINT_MAP(ThrowingOverrideSource)
+        CONNECTION_POINT_ENTRY(EventsIID)
+    END_CONNECTION_POINT_MAP()
+    HRESULT STDMETHODCALLTYPE Advise(IUnknown*, DWORD* cookie) override {
+        if (cookie) *cookie = 99;
+        throw ATL::CAtlException(E_ACCESSDENIED);
+    }
 };
 template<class T> bool Make(ATL::CComPtr<ATL::CComObject<T>>& result) {
     ATL::CComObject<T>* raw = nullptr;
@@ -253,6 +270,11 @@ bool MapsAndFailures() {
     custom->fail = false;
     CP_CHECK(customPoint->Advise(static_cast<IPersist*>(&sink), &cookie) == S_OK && custom->advises == 2 && sink.refs == 2);
     CP_CHECK(customPoint->Unadvise(cookie) == S_OK && custom->unadvises == 1 && sink.refs == 1);
+    ATL::CComPtr<ATL::CComObject<ThrowingOverrideSource>> throwing; CP_CHECK(Make(throwing));
+    ATL::CComPtr<IConnectionPoint> throwingPoint;
+    CP_CHECK(throwing->FindConnectionPoint(EventsIID, &throwingPoint.p) == S_OK);
+    cookie = 91;
+    CP_CHECK(throwingPoint->Advise(static_cast<IPersist*>(&sink), &cookie) == E_ACCESSDENIED && !cookie && sink.refs == 1);
     return true;
 }
 bool SnapshotsAndLifetime() {
