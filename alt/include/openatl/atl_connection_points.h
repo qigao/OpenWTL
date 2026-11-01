@@ -188,8 +188,8 @@ class IConnectionPointImpl : public _ICPLocator<InterfaceId> {
             if (iid != IID_IUnknown && iid != IID_IConnectionPoint) return E_NOINTERFACE;
             *output = static_cast<IConnectionPoint*>(this); AddRef(); return S_OK;
         }
-        ULONG STDMETHODCALLTYPE AddRef() noexcept override { return point_.Owner()->AddRef(); }
-        ULONG STDMETHODCALLTYPE Release() noexcept override { return point_.Owner()->Release(); }
+        ULONG STDMETHODCALLTYPE AddRef() noexcept override { return point_.Container()->AddRef(); }
+        ULONG STDMETHODCALLTYPE Release() noexcept override { return point_.Container()->Release(); }
         HRESULT STDMETHODCALLTYPE GetConnectionInterface(IID* output) noexcept override { return point_.GetConnectionInterface(output); }
         HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) noexcept override { return point_.GetConnectionPointContainer(output); }
         HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) noexcept override { return point_.Advise(sink, cookie); }
@@ -199,6 +199,7 @@ class IConnectionPointImpl : public _ICPLocator<InterfaceId> {
         IConnectionPointImpl& point_;
     } face_{*this};
     T* Owner() noexcept { return static_cast<T*>(this); }
+    IConnectionPointContainer* Container() noexcept { return static_cast<IConnectionPointContainer*>(Owner()); }
 public:
     CDV m_vec;
     IConnectionPointImpl() = default;
@@ -216,7 +217,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetConnectionPointContainer(IConnectionPointContainer** output) noexcept {
         if (!output) return E_POINTER;
         *output = nullptr;
-        return Owner()->QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(output));
+        return Container()->QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(output));
     }
     HRESULT STDMETHODCALLTYPE Advise(IUnknown* sink, DWORD* cookie) noexcept {
         if (!cookie) return E_POINTER;
