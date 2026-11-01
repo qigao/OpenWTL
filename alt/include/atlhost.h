@@ -513,9 +513,54 @@ struct AxDialogCreation {
     LPARAM parameter;
     bool modal;
     DWORD error = ERROR_SUCCESS;
-    static INT_PTR CALLBACK InitializingProc(HWND, UINT, WPARAM, LPARAM) noexcept { return FALSE; }
+    HWND window = nullptr;
+    bool subclassed = false, initializing = false, initialized = false, retired = false;
+    static AxDialogCreation*& Current() noexcept {
+        static thread_local AxDialogCreation* current = nullptr;
+        return current;
+    }
+    UINT_PTR Key() const noexcept { return reinterpret_cast<UINT_PTR>(this); }
+    void Detach() noexcept {
+        if (subclassed && window && ::IsWindow(window)) {
+            DWORD_PTR data = 0;
+            if (::GetWindowSubclass(window, Subclass, Key(), &data) && data == reinterpret_cast<DWORD_PTR>(this) &&
+                !::RemoveWindowSubclass(window, Subclass, Key())) std::terminate();
+        }
+        subclassed = false;
+    }
+    struct Scope {
+        AxDialogCreation& creation;
+        AxDialogCreation* previous;
+        explicit Scope(AxDialogCreation& value) noexcept : creation(value), previous(Current()) { Current() = &value; }
+        ~Scope() {
+            const DWORD error = ::GetLastError();
+            creation.Detach(); Current() = previous; ::SetLastError(error);
+        }
+        Scope(const Scope&) = delete;
+        Scope& operator=(const Scope&) = delete;
+    };
+    void Abort(HRESULT hr) noexcept {
+        if (!error) error = AxDialogError(hr);
+        if (!retired && window && ::IsWindow(window)) {
+            if (modal) ::EndDialog(window, -1); else ::DestroyWindow(window);
+        }
+    }
+    HRESULT Bind(HWND target) noexcept {
+        if (window || retired) return E_UNEXPECTED;
+        window = target;
+        ::SetLastError(ERROR_SUCCESS);
+        if (!::SetWindowSubclass(target, Subclass, Key(), reinterpret_cast<DWORD_PTR>(this))) {
+            const DWORD failure = ::GetLastError();
+            return failure ? HRESULT_FROM_WIN32(failure) : E_FAIL;
+        }
+        subclassed = true;
+        ::SetLastError(ERROR_SUCCESS);
+        const LONG_PTR previous = ::SetWindowLongPtrW(target, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(procedure));
+        return !previous && ::GetLastError() ? HRESULT_FROM_WIN32(::GetLastError()) : S_OK;
+    }
     HRESULT Initialize(HWND dialog) noexcept {
         for (const auto& record : prepared.initialization) {
+            if (retired) return E_ABORT;
             const HWND child = ::GetDlgItem(dialog, record.id);
             if (!child) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
             if (record.IsString()) {
@@ -574,30 +619,36 @@ struct AxDialogCreation {
         }
         return S_OK;
     }
-    static INT_PTR CALLBACK DialogProc(HWND window, UINT message, WPARAM w, LPARAM l) noexcept {
-        // Keep application callbacks out of the initialization transaction. The
-        // native dialog manager creates all ordinary children first.
-        if (message != WM_INITDIALOG) return FALSE;
-        auto& creation = *reinterpret_cast<AxDialogCreation*>(l);
-        // A control may synchronously send another WM_INITDIALOG while loading.
-        // It must not reinterpret that message's lParam as our creation context.
-        ::SetLastError(ERROR_SUCCESS);
-        const LONG_PTR previousProcedure = ::SetWindowLongPtrW(window, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(InitializingProc));
-        HRESULT hr = !previousProcedure && ::GetLastError() ? HRESULT_FROM_WIN32(::GetLastError()) : S_OK;
-        if (SUCCEEDED(hr)) hr = creation.Initialize(window);
-        if (SUCCEEDED(hr)) {
-            ::SetLastError(ERROR_SUCCESS);
-            const LONG_PTR previous = ::SetWindowLongPtrW(window, DWLP_DLGPROC, reinterpret_cast<LONG_PTR>(creation.procedure));
-            if (!previous && ::GetLastError()) hr = HRESULT_FROM_WIN32(::GetLastError());
-        }
-        if (FAILED(hr)) {
-            creation.error = AxDialogError(hr);
-            if (::IsWindow(window)) {
-                if (creation.modal) ::EndDialog(window, -1); else ::DestroyWindow(window);
-            }
-            return FALSE;
-        }
-        return creation.procedure ? creation.procedure(window, message, w, creation.parameter) : FALSE;
+    bool BeginInitialization() noexcept {
+        if (initializing || initialized || retired || error) return false;
+        initializing = true;
+        const HRESULT hr = Initialize(window);
+        initializing = false;
+        if (FAILED(hr) || retired) { Abort(FAILED(hr) ? hr : E_ABORT); return false; }
+        initialized = true;
+        Detach(); // No stack reference remains on a returned modeless window.
+        return true;
+    }
+    static LRESULT CALLBACK Subclass(HWND target, UINT message, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) noexcept {
+        auto& creation = *reinterpret_cast<AxDialogCreation*>(data);
+        if (message == WM_NCDESTROY) {
+            creation.Detach(); creation.retired = true; creation.window = nullptr;
+        } else if (message == WM_INITDIALOG && !creation.BeginInitialization()) return FALSE;
+        // This reaches the actual current dialog procedure, including a thunk
+        // installed by an early StartDialogProc callback.
+        return ::DefSubclassProc(target, message, w, l);
+    }
+    static INT_PTR CALLBACK DialogProc(HWND target, UINT message, WPARAM w, LPARAM l) noexcept {
+        auto creation = Current();
+        if (!creation || creation->retired || (creation->window && creation->window != target)) return FALSE;
+        const HRESULT hr = creation->Bind(target);
+        if (FAILED(hr)) { creation->Abort(hr); return FALSE; }
+        // The first callback can itself be WM_INITDIALOG: installing a window
+        // subclass now cannot intercept the message already being dispatched.
+        if (message == WM_INITDIALOG && !creation->BeginInitialization()) return FALSE;
+        if (creation->retired || !::IsWindow(target)) return FALSE;
+        const auto application = reinterpret_cast<DLGPROC>(::GetWindowLongPtrW(target, DWLP_DLGPROC));
+        return application && application != DialogProc ? application(target, message, w, l) : FALSE;
     }
 };
 template<class T, class = void> struct HasAxSinkMap : std::false_type {};
@@ -609,9 +660,13 @@ inline HWND WINAPI AtlAxCreateDialog(HINSTANCE instance, LPCWSTR name, HWND pare
     if (!detail::PrepareAxDialog(instance, name, prepared)) return nullptr;
     if (!prepared.initialization.empty()) {
         detail::AxDialogCreation creation{prepared, procedure, parameter, false};
+        detail::AxDialogCreation::Scope scope(creation);
+        ::SetLastError(ERROR_SUCCESS);
         const HWND window = ::CreateDialogIndirectParamW(instance, prepared.Get(), parent,
-            detail::AxDialogCreation::DialogProc, reinterpret_cast<LPARAM>(&creation));
+            detail::AxDialogCreation::DialogProc, parameter);
+        const DWORD error = ::GetLastError();
         if (creation.error) { ::SetLastError(creation.error); return nullptr; }
+        if (!creation.initialized || creation.retired) { ::SetLastError(creation.retired || !error ? ERROR_CANCELLED : error); return nullptr; }
         return window;
     }
     if (prepared.converted) return ::CreateDialogIndirectParamW(instance, prepared.Get(), parent, procedure, parameter);
@@ -623,9 +678,13 @@ inline int WINAPI AtlAxDialogBox(HINSTANCE instance, LPCWSTR name, HWND parent,
     if (!detail::PrepareAxDialog(instance, name, prepared)) return -1;
     if (!prepared.initialization.empty()) {
         detail::AxDialogCreation creation{prepared, procedure, parameter, true};
+        detail::AxDialogCreation::Scope scope(creation);
+        ::SetLastError(ERROR_SUCCESS);
         const int result = static_cast<int>(::DialogBoxIndirectParamW(instance, prepared.Get(), parent,
-            detail::AxDialogCreation::DialogProc, reinterpret_cast<LPARAM>(&creation)));
+            detail::AxDialogCreation::DialogProc, parameter));
+        const DWORD error = ::GetLastError();
         if (creation.error) { ::SetLastError(creation.error); return -1; }
+        if (!creation.initialized || creation.retired) { ::SetLastError(creation.retired || !error ? ERROR_CANCELLED : error); return -1; }
         return result;
     }
     if (prepared.converted) return static_cast<int>(::DialogBoxIndirectParamW(instance, prepared.Get(), parent, procedure, parameter));
@@ -754,7 +813,7 @@ public:
         // WM_INITDIALOG/OnFinalMessage may already have deleted the owner.
         if (!state.destroyed) creation_ = nullptr;
         if (state.error || state.destroyed || !state.initialized || !window) {
-            ::SetLastError(state.error ? state.error : state.destroyed ? ERROR_CANCELLED : error ? error : ERROR_GEN_FAILURE);
+            ::SetLastError(state.error ? state.error : state.destroyed && state.initialized ? ERROR_CANCELLED : error ? error : ERROR_GEN_FAILURE);
             return nullptr;
         }
         return window;

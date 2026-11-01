@@ -155,10 +155,12 @@ inline DWORD BuildAxDialogTemplate(const void* data, size_t size, AxDialogTempla
                     std::memcpy(&itemStyle, reader.bytes + start + (extended ? 8 : 0), sizeof(itemStyle));
                     if (current.kind == AxDialogInit::Kind::ListString) {
                         if (atom != 0x83 && !reader.Equals(itemClass, L"ListBox", 7)) return ERROR_INVALID_DATA;
-                        if (itemStyle & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE | LBS_NODATA)) return ERROR_NOT_SUPPORTED;
+                        if ((itemStyle & LBS_NODATA) || ((itemStyle & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE)) &&
+                            !(itemStyle & LBS_HASSTRINGS))) return ERROR_NOT_SUPPORTED;
                     } else {
                         if (atom != 0x85 && !reader.Equals(itemClass, L"ComboBox", 8)) return ERROR_INVALID_DATA;
-                        if (itemStyle & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) return ERROR_NOT_SUPPORTED;
+                        if ((itemStyle & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) &&
+                            !(itemStyle & CBS_HASSTRINGS)) return ERROR_NOT_SUPPORTED;
                     }
                     matched[i] = true;
                     orderedInitialization.push_back(std::move(current));

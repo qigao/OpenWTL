@@ -77,13 +77,17 @@ the host selects IPersistStorage::Load without stream/default fallback. Empty
 empty 0x0376 stream still calls Load. Nonempty INITNEW payloads remain unsupported.
 Initialization finishes before application WM_INITDIALOG and automatic sink subscriptions;
 failed or reentrant retirement destroys the partial dialog. Storage saving/switching, binding,
-owner-drawn/no-data list/combo initialization and nonempty inline placeholder
-data still fail explicitly. Ordinary ListBox/ComboBox DLGINIT 0x401/0x403 strings
+owner-drawn list/combo initialization without HASSTRINGS, no-data controls and
+nonempty inline placeholder data still fail explicitly. Ordinary ListBox/ComboBox DLGINIT 0x401/0x403 strings
 are applied before application WM_INITDIALOG. Counted ANSI bytes use native
 SendMessageA and Windows character-set translation; repeated strings retain
 resource order within each control. Malformed strings and class/ID mismatches
-fail before window creation. This path creates all native children before initializing controls
-and does not forward early application dialog callbacks. See
+fail before window creation. This path creates all native children before initializing controls. Native early
+application callbacks are forwarded, including owner-drawn fixed/variable item
+measurement and drawing. Resource initialization still precedes application
+WM_INITDIALOG and automatic sink binding. A temporary native window subclass and
+call-scoped thread context are removed before handoff or destruction; nested
+creation restores the outer context. See
 [control-dialog scope](ATL_COMPATIBILITY.md#control-hosting-dialogs).
 See [TypeLib event scope](ATL_COMPATIBILITY.md#typelib-driven-event-sinks) for
 supported signatures, map spellings and remaining provider/type limitations.
