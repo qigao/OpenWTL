@@ -93,11 +93,27 @@ static int strings() {
         resource.Compare(longExpected.c_str()) != 0)
         return failure(23, "CString_LoadString_long_alias");
 
+    // First verify the genuine Win32 resource compiler output, separately
+    // from CString. A malformed fixture must not be blamed on the API.
+    LPCWSTR rawCjk = nullptr;
+    const int rawCjkLength = ::LoadStringW(
+        ATL::_AtlBaseModule.GetResourceInstance(), 43002,
+        reinterpret_cast<LPWSTR>(&rawCjk), 0);
+    if (rawCjkLength != 2 || !rawCjk ||
+        rawCjk[0] != L'\u4e2d' || rawCjk[1] != L'\u6587')
+        return failure(24, "CString_resource_fixture_CJK");
     if (!resource.LoadStringW(43002) ||
         resource.Compare(L"\u4e2d\u6587") != 0)
-        return failure(24, "CString_LoadStringW_CJK");
+        return failure(27, "CString_LoadStringW_CJK");
 
     const wchar_t embedded[] = {L'A', 0, L'B'};
+    LPCWSTR rawEmbedded = nullptr;
+    const int rawEmbeddedLength = ::LoadStringW(
+        ATL::_AtlBaseModule.GetResourceInstance(), 43003,
+        reinterpret_cast<LPWSTR>(&rawEmbedded), 0);
+    if (rawEmbeddedLength != 3 || !rawEmbedded ||
+        std::memcmp(rawEmbedded, embedded, sizeof(embedded)) != 0)
+        return failure(28, "CString_resource_fixture_embedded_NUL");
     if (!resource.LoadStringW(43003) ||
         resource.GetLength() != 3 ||
         std::memcmp(resource.GetString(), embedded, sizeof(embedded)) != 0)
