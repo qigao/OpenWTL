@@ -11,6 +11,9 @@
 bool RunAtlSafeArrayTests();
 bool RunAtlConnectionPointTests();
 bool RunAtlPropertyNotifyTests();
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+bool RunAtlTypeLibEventTests();
+#endif
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ATL_COMPAT_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
@@ -1159,6 +1162,9 @@ bool RunAtlCompatibilityTests() {
     CHECK(RunAtlSafeArrayTests());
     CHECK(RunAtlConnectionPointTests());
     CHECK(RunAtlPropertyNotifyTests());
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    CHECK(RunAtlTypeLibEventTests());
+#endif
     CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());

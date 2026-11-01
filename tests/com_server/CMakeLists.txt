@@ -199,6 +199,24 @@ if(CMAKE_HOST_WIN32)
       "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
     COMMENT "Actual Windows SDK MIDL: original Microsoft AtlSafeArray.idl"
     VERBATIM)
+  set(_openatl_event_generated "${CMAKE_CURRENT_BINARY_DIR}/event-fixture")
+  file(MAKE_DIRECTORY "${_openatl_event_generated}")
+  add_custom_command(
+    OUTPUT "${_openatl_event_generated}/EventFixture.h"
+           "${_openatl_event_generated}/EventFixture_i.c"
+           "${_openatl_event_generated}/EventFixture.tlb"
+    COMMAND "${OPENATL_COMMAP_MIDL_EXECUTABLE}" /nologo /env ${_openatl_midl_env}
+      ${_openatl_midl_cpp_args} ${_openatl_midl_include_flags}
+      /out "${_openatl_event_generated}" /h EventFixture.h
+      /iid EventFixture_i.c /tlb EventFixture.tlb "${CMAKE_CURRENT_SOURCE_DIR}/EventFixture.idl"
+    COMMAND "${CMAKE_COMMAND}" "-DOPENATL_MIDL_MINGW=${MINGW}"
+      "-DOPENATL_MIDL_HEADER=${_openatl_event_generated}/EventFixture.h"
+      -P "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/EventFixture.idl"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
+    COMMENT "Actual Windows SDK MIDL: own dispatch event fixture"
+    VERBATIM)
   add_custom_target(openatl_microsoft_commap_midl ALL DEPENDS
     "${_openatl_commap_header}" "${_openatl_commap_iid}"
     "${_openatl_commap_tlb}"
@@ -207,31 +225,37 @@ if(CMAKE_HOST_WIN32)
     "${_openatl_aggreg_generated}/Aggreg.tlb"
     "${_openatl_safe_generated}/AtlSafeArray.h"
     "${_openatl_safe_generated}/AtlSafeArray_i.c"
-    "${_openatl_safe_generated}/AtlSafeArray.tlb")
+    "${_openatl_safe_generated}/AtlSafeArray.tlb"
+    "${_openatl_event_generated}/EventFixture.h"
+    "${_openatl_event_generated}/EventFixture_i.c"
+    "${_openatl_event_generated}/EventFixture.tlb")
   add_dependencies(openatl_com_server_tests openatl_microsoft_commap_midl)
   set_source_files_properties("${_openatl_commap_iid}"
+    "${_openatl_event_generated}/EventFixture_i.c"
     PROPERTIES GENERATED TRUE LANGUAGE CXX)
   target_sources(openatl_com_server_tests PRIVATE
+    "${_openatl_event_generated}/EventFixture_i.c" atl_event_typelib.cpp
     "${_openatl_commap_iid}"
     "${_openatl_commap_original}/commap_midl_native.cpp")
   target_include_directories(openatl_com_server_tests PRIVATE
-    "${_openatl_commap_generated}")
+    "${_openatl_commap_generated}" "${_openatl_event_generated}")
   target_compile_definitions(openatl_com_server_tests PRIVATE
     OPENATL_ORIGINAL_COMMAP_MIDL=1)
   # Embed the same real MIDL output in both existing native test images.
   # Target ordering makes the TypeLib available before Windows RC runs.
   set(_openatl_embedded_rc "${CMAKE_CURRENT_BINARY_DIR}/fixture_typelib.rc")
   file(WRITE "${_openatl_embedded_rc}"
-    "1 TYPELIB \"${_openatl_commap_tlb}\"\n2 TYPELIB \"${_openatl_aggreg_generated}/Aggreg.tlb\"\n3 TYPELIB \"${_openatl_safe_generated}/AtlSafeArray.tlb\"\n")
+    "1 TYPELIB \"${_openatl_commap_tlb}\"\n2 TYPELIB \"${_openatl_aggreg_generated}/Aggreg.tlb\"\n3 TYPELIB \"${_openatl_safe_generated}/AtlSafeArray.tlb\"\n4 TYPELIB \"${_openatl_event_generated}/EventFixture.tlb\"\n")
   target_sources(openatl_com_server_fixture PRIVATE
-    "${_openatl_embedded_rc}" "${_openatl_commap_iid}")
+    "${_openatl_embedded_rc}" "${_openatl_commap_iid}"
+    "${_openatl_event_generated}/EventFixture_i.c")
   target_sources(openatl_com_server_tests PRIVATE
     "${_openatl_embedded_rc}" embedded_dispatch.cpp)
   set_source_files_properties("${_openatl_embedded_rc}" PROPERTIES
-    OBJECT_DEPENDS "${_openatl_commap_tlb};${_openatl_aggreg_generated}/Aggreg.tlb;${_openatl_safe_generated}/AtlSafeArray.tlb")
+    OBJECT_DEPENDS "${_openatl_commap_tlb};${_openatl_aggreg_generated}/Aggreg.tlb;${_openatl_safe_generated}/AtlSafeArray.tlb;${_openatl_event_generated}/EventFixture.tlb")
   add_dependencies(openatl_com_server_fixture openatl_microsoft_commap_midl)
   target_include_directories(openatl_com_server_fixture PRIVATE
-    "${_openatl_commap_generated}")
+    "${_openatl_commap_generated}" "${_openatl_event_generated}")
   target_compile_definitions(openatl_com_server_fixture PRIVATE
     OPENATL_ORIGINAL_COMMAP_MIDL=1)
   # Admit the original two DLL entry points/resources inside existing DLLs.

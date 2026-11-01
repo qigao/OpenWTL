@@ -53,6 +53,7 @@ template<class A> bool EventAccepts(VARTYPE type) {
     else if constexpr (std::is_same_v<A, VARIANT*>) return type == (VT_BYREF | VT_VARIANT);
     else if constexpr (std::is_same_v<A, VARIANT>) return type == VT_VARIANT;
     else if constexpr (std::is_pointer_v<A>) return (type & VT_BYREF) && EventAccepts<std::remove_pointer_t<A>>(type & ~VT_BYREF);
+    else if constexpr (std::is_enum_v<A>) return EventAccepts<std::underlying_type_t<A>>(type);
     else if constexpr (std::is_integral_v<A>) {
         if constexpr (sizeof(A) == 1) return type == VT_I1 || type == VT_UI1;
         if constexpr (sizeof(A) == 2) return type == VT_I2 || type == VT_UI2 || type == VT_BOOL;
@@ -72,6 +73,7 @@ template<class A> A EventArgument(VARIANTARG& v) {
     else if constexpr (std::is_same_v<A, IUnknown*>) return v.punkVal;
     else if constexpr (std::is_same_v<A, VARIANT*>) return v.pvarVal;
     else if constexpr (std::is_same_v<A, VARIANT>) return v;
+    else if constexpr (std::is_enum_v<A>) return static_cast<A>(EventArgument<std::underlying_type_t<A>>(v));
     else if constexpr (std::is_pointer_v<A>) return static_cast<A>(v.byref);
     else {
         switch (v.vt) {
@@ -91,6 +93,7 @@ template<class A> A EventArgument(VARIANTARG& v) {
     }
 }
 template<class R, class C, class... A> struct EventSignature {
+    using Class = C;
     template<auto Method, size_t... I>
     static HRESULT Call(void* object, DISPPARAMS* params, const _ATL_FUNC_INFO* info,
                         UINT* argument, std::index_sequence<I...>) {
@@ -147,6 +150,11 @@ template<auto Method> HRESULT InvokeEvent(void* object, DISPPARAMS* params,
     catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     catch (...) { return DISP_E_EXCEPTION; }
 }
+template<class Owner, auto Method> HRESULT InvokeMappedEvent(void* object, DISPPARAMS* params,
+    const _ATL_FUNC_INFO* info, UINT* argument) {
+    using Class = typename EventTraits<decltype(Method)>::Class;
+    return InvokeEvent<Method>(static_cast<Class*>(static_cast<Owner*>(object)), params, info, argument);
+}
 } // namespace detail
 
 // As in ATL, the containing C++ object owns this sink's lifetime. Unadvise
@@ -181,14 +189,53 @@ public:
     HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Invoke(DISPID member, REFIID iid, LCID, WORD flags, DISPPARAMS* params,
                                      VARIANT* result, EXCEPINFO*, UINT* argument) override {
+        return InvokeMapped(member, iid, 0, flags, params, result, argument,
+            [](DISPID, LCID, _ATL_FUNC_INFO&) { return E_NOTIMPL; });
+    }
+protected:
+    template<class Resolver>
+    HRESULT InvokeMapped(DISPID member, REFIID iid, LCID locale, WORD flags, DISPPARAMS* params,
+                         VARIANT* result, UINT* argument, Resolver&& resolve) {
         if (iid != IID_NULL) return DISP_E_UNKNOWNINTERFACE;
         if (!(flags & DISPATCH_METHOD)) return DISP_E_MEMBERNOTFOUND;
         if (result) ::VariantInit(result);
         for (auto entry = T::_GetSinkMap(); entry->iid; ++entry)
-            if (entry->control == nID && *entry->iid == iid_ && entry->member == member)
-                return entry->call(static_cast<T*>(this), params, entry->info, argument);
+            if (entry->control == nID && (*entry->iid == IID_NULL || *entry->iid == iid_) && entry->member == member) {
+                _ATL_FUNC_INFO discovered{};
+                const _ATL_FUNC_INFO* info = entry->info;
+                if (!info) {
+                    const HRESULT hr = resolve(member, locale, discovered);
+                    if (FAILED(hr)) return hr;
+                    info = &discovered;
+                }
+                return entry->call(static_cast<T*>(this), params, info, argument);
+            }
         return DISP_E_MEMBERNOTFOUND;
     }
+    HRESULT ConnectPoint(IUnknown* source, REFIID selected) noexcept {
+        CComPtr<IConnectionPointContainer> container;
+        HRESULT hr = source->QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(&container.p));
+        if (FAILED(hr)) return hr;
+        if (!container.p) return E_UNEXPECTED;
+        CComPtr<IConnectionPoint> point;
+        hr = container->FindConnectionPoint(selected, &point.p);
+        if (FAILED(hr)) return hr;
+        if (!point.p) return E_UNEXPECTED;
+        const IID previous = iid_;
+        iid_ = selected; // QI/Invoke may occur synchronously inside Advise.
+        DWORD cookie = 0;
+        hr = point->Advise(static_cast<IDispatch*>(this), &cookie);
+        if (hr == S_OK && cookie) { point_ = point; m_dwEventCookie = cookie; return S_OK; }
+        iid_ = previous;
+        return FAILED(hr) ? hr : E_UNEXPECTED;
+    }
+    HRESULT DisconnectPoint() noexcept {
+        if (!point_) return CONNECT_E_NOCONNECTION;
+        const HRESULT hr = point_->Unadvise(m_dwEventCookie);
+        if (hr == S_OK) { point_.Release(); m_dwEventCookie = 0xFEFEFEFE; }
+        return hr;
+    }
+public:
     HRESULT DispEventAdvise(IUnknown* source, const IID* iid = pdiid) noexcept {
         if (!source) return E_POINTER;
         if (changing_) return E_UNEXPECTED;
@@ -202,23 +249,14 @@ public:
             hr = info->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &selected);
             if (FAILED(hr)) return hr;
         }
-        CComPtr<IConnectionPointContainer> container;
-        HRESULT hr = source->QueryInterface(IID_IConnectionPointContainer, reinterpret_cast<void**>(&container));
-        if (FAILED(hr)) return hr;
-        CComPtr<IConnectionPoint> point;
-        hr = container->FindConnectionPoint(selected, &point);
-        if (FAILED(hr)) return hr;
-        iid_ = selected;
-        hr = point->Advise(static_cast<IDispatch*>(this), &m_dwEventCookie);
-        if (SUCCEEDED(hr)) point_ = point;
-        return hr;
+        return ConnectPoint(source, selected);
     }
     HRESULT DispEventUnadvise(IUnknown* source, const IID* iid = pdiid) noexcept {
         if (!source) return E_POINTER;
         if (changing_) return E_UNEXPECTED;
         if (!point_) return CONNECT_E_NOCONNECTION;
         Change guard(changing_);
-        if (iid && *iid != iid_) return CONNECT_E_NOCONNECTION;
+        if (iid && *iid != IID_NULL && *iid != iid_) return CONNECT_E_NOCONNECTION;
         CComPtr<IConnectionPointContainer> owner;
         HRESULT hr = point_->GetConnectionPointContainer(&owner);
         if (FAILED(hr)) return hr;
@@ -228,18 +266,202 @@ public:
         hr = source->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&requested));
         if (FAILED(hr)) return hr;
         if (actual.p != requested.p) return CONNECT_E_NOCONNECTION;
-        hr = point_->Unadvise(m_dwEventCookie);
-        if (SUCCEEDED(hr)) { point_.Release(); m_dwEventCookie = 0xFEFEFEFE; }
-        return hr;
+        return DisconnectPoint();
     }
     HRESULT Advise(IUnknown* source) noexcept { return DispEventAdvise(source); }
     HRESULT Unadvise(IUnknown* source) noexcept { return DispEventUnadvise(source); }
     DWORD m_dwEventCookie = 0xFEFEFEFE;
-private:
+protected:
     struct Change { bool& flag; explicit Change(bool& value) : flag(value) { flag = true; } ~Change() { flag = false; } };
     bool changing_ = false;
     IID iid_;
     CComPtr<IConnectionPoint> point_;
+};
+
+namespace detail {
+inline HRESULT EventVariantType(ITypeInfo* info, const TYPEDESC& description,
+                                VARTYPE& type, unsigned depth = 0) noexcept {
+    type = VT_EMPTY;
+    if (!info || depth >= 16) return E_INVALIDARG;
+    if (description.vt == VT_USERDEFINED) {
+        CComPtr<ITypeInfo> referenced;
+        HRESULT hr = info->GetRefTypeInfo(description.hreftype, &referenced.p);
+        if (FAILED(hr)) return hr;
+        if (!referenced.p) return E_UNEXPECTED;
+        TYPEATTR* attr = nullptr;
+        hr = referenced->GetTypeAttr(&attr);
+        if (FAILED(hr)) return hr;
+        if (!attr) return E_UNEXPECTED;
+        switch (attr->typekind) {
+        case TKIND_ALIAS: hr = EventVariantType(referenced.p, attr->tdescAlias, type, depth + 1); break;
+        case TKIND_ENUM: type = VT_I4; break;
+        case TKIND_DISPATCH: type = VT_DISPATCH; break;
+        case TKIND_INTERFACE: type = attr->guid == IID_IDispatch ? VT_DISPATCH : VT_UNKNOWN; break;
+        default: hr = E_NOTIMPL; break;
+        }
+        referenced->ReleaseTypeAttr(attr);
+        return hr;
+    }
+    if (description.vt == VT_PTR) {
+        if (!description.lptdesc) return E_UNEXPECTED;
+        HRESULT hr = EventVariantType(info, *description.lptdesc, type, depth + 1);
+        if (FAILED(hr)) return hr;
+        // A pointer to a user-defined COM interface is a value interface,
+        // whereas a scalar/VARIANT pointer is an Automation BYREF argument.
+        if (description.lptdesc->vt == VT_USERDEFINED && (type == VT_UNKNOWN || type == VT_DISPATCH)) return S_OK;
+        if (type & VT_BYREF) return E_NOTIMPL;
+        type |= VT_BYREF; return S_OK;
+    }
+    switch (description.vt) {
+    case VT_I1: case VT_UI1: case VT_I2: case VT_UI2: case VT_I4: case VT_UI4:
+    case VT_I8: case VT_UI8: case VT_INT: case VT_UINT: case VT_R4: case VT_R8:
+    case VT_BOOL: case VT_DATE: case VT_BSTR: case VT_VARIANT: case VT_UNKNOWN:
+    case VT_DISPATCH: case VT_VOID: case VT_HRESULT: case VT_EMPTY:
+        type = description.vt; return S_OK;
+    default: return E_NOTIMPL;
+    }
+}
+}
+
+template<UINT nID, class T, const IID* pdiid = &IID_NULL,
+         const GUID* plibid = &GUID_NULL, WORD wMajor = 0, WORD wMinor = 0,
+         class tihclass = CComTypeInfoHolder>
+class IDispEventImpl : public IDispEventSimpleImpl<nID, T, pdiid> {
+    using Base = IDispEventSimpleImpl<nID, T, pdiid>;
+    CComPtr<ITypeInfo> bound_;
+    static inline tihclass holder_{};
+    HRESULT TypeInfo(LCID locale, ITypeInfo** output) noexcept {
+        if (bound_) return bound_.CopyTo(output);
+        if (!pdiid || !plibid || *pdiid == IID_NULL || *plibid == GUID_NULL) return TYPE_E_LIBNOTREGISTERED;
+        return holder_.GetTI(pdiid, plibid, wMajor, wMinor, locale, output);
+    }
+public:
+    using _tihclass = tihclass;
+    ~IDispEventImpl() {
+        if (this->point_ && this->DisconnectPoint() != S_OK) std::terminate();
+    }
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT* output) override {
+        if (!output) return E_POINTER; *output = 1; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT index, LCID locale, ITypeInfo** output) override {
+        if (!output) return E_POINTER; *output = nullptr;
+        if (index) return DISP_E_BADINDEX;
+        const HRESULT hr = TypeInfo(locale, output);
+        return SUCCEEDED(hr) && !*output ? E_UNEXPECTED : hr;
+    }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID iid, LPOLESTR* names, UINT count,
+                                            LCID locale, DISPID* output) override {
+        if (!names || !output) return E_POINTER;
+        if (!count || count > 1024) return E_INVALIDARG;
+        for (UINT n = 0; n < count; ++n) { output[n] = DISPID_UNKNOWN; if (!names[n]) return E_INVALIDARG; }
+        if (iid != IID_NULL) return DISP_E_UNKNOWNINTERFACE;
+        CComPtr<ITypeInfo> info;
+        const HRESULT hr = GetTypeInfo(0, locale, &info.p);
+        return FAILED(hr) ? hr : info->GetIDsOfNames(names, count, output);
+    }
+    VARTYPE GetUserDefinedType(ITypeInfo* info, HREFTYPE reference) noexcept {
+        TYPEDESC description{}; description.vt = VT_USERDEFINED; description.hreftype = reference;
+        VARTYPE type = VT_EMPTY;
+        return SUCCEEDED(detail::EventVariantType(info, description, type)) ? type : VT_EMPTY;
+    }
+    HRESULT GetFuncInfoFromId(const IID& iid, DISPID member, LCID locale, _ATL_FUNC_INFO& output) noexcept {
+        output = {};
+        if (iid != this->iid_) return E_NOINTERFACE;
+        CComPtr<ITypeInfo> info;
+        HRESULT hr = GetTypeInfo(0, locale, &info.p);
+        if (FAILED(hr)) return hr;
+        TYPEATTR* attr = nullptr;
+        hr = info->GetTypeAttr(&attr);
+        if (FAILED(hr)) return hr;
+        if (!attr) return E_UNEXPECTED;
+        const WORD functions = attr->cFuncs;
+        info->ReleaseTypeAttr(attr);
+        for (UINT n = 0; n < functions; ++n) {
+            FUNCDESC* function = nullptr;
+            hr = info->GetFuncDesc(n, &function);
+            if (FAILED(hr)) return hr;
+            if (!function) return E_UNEXPECTED;
+            struct Release { ITypeInfo* info; FUNCDESC* value; ~Release() { info->ReleaseFuncDesc(value); } } release{info.p, function};
+            if (function->memid != member || function->invkind != INVOKE_FUNC) continue;
+            _ATL_FUNC_INFO candidate{};
+            if (function->cParams < 0 || function->cParams > 8 || function->cParamsOpt ||
+                (function->callconv != CC_STDCALL && function->callconv != CC_CDECL)) return E_NOTIMPL;
+            candidate.cc = function->callconv; candidate.nParams = function->cParams;
+            hr = detail::EventVariantType(info.p, function->elemdescFunc.tdesc, candidate.vtReturn);
+            if (FAILED(hr)) return hr;
+            if (candidate.vtReturn != VT_VOID && candidate.vtReturn != VT_EMPTY && candidate.vtReturn != VT_HRESULT) return E_NOTIMPL;
+            for (SHORT p = 0; p < function->cParams; ++p) {
+                const auto& parameter = function->lprgelemdescParam[p];
+                if (parameter.paramdesc.wParamFlags & (PARAMFLAG_FRETVAL | PARAMFLAG_FLCID | PARAMFLAG_FOPT)) return E_NOTIMPL;
+                hr = detail::EventVariantType(info.p, parameter.tdesc, candidate.pVarTypes[p]);
+                if (FAILED(hr)) return hr;
+            }
+            output = candidate; return S_OK;
+        }
+        return DISP_E_MEMBERNOTFOUND;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID member, REFIID iid, LCID locale, WORD flags,
+        DISPPARAMS* params, VARIANT* result, EXCEPINFO*, UINT* argument) override {
+        return this->InvokeMapped(member, iid, locale, flags, params, result, argument,
+            [&](DISPID id, LCID language, _ATL_FUNC_INFO& info) { return GetFuncInfoFromId(this->iid_, id, language, info); });
+    }
+    HRESULT DispEventAdvise(IUnknown* source, const IID* iid = pdiid) noexcept {
+        if (!source) return E_POINTER;
+        if (this->changing_) return E_UNEXPECTED;
+        if (this->point_) return CONNECT_E_ADVISELIMIT;
+        typename Base::Change guard(this->changing_);
+        IID selected = iid ? *iid : IID_NULL;
+        CComPtr<ITypeInfo> candidate;
+        if (selected == IID_NULL || !plibid || *plibid == GUID_NULL) {
+            CComPtr<IProvideClassInfo2> provider;
+            HRESULT hr = source->QueryInterface(IID_IProvideClassInfo2, reinterpret_cast<void**>(&provider.p));
+            if (FAILED(hr)) return hr;
+            if (!provider.p) return E_UNEXPECTED;
+            if (selected == IID_NULL) {
+                hr = provider->GetGUID(GUIDKIND_DEFAULT_SOURCE_DISP_IID, &selected);
+                if (FAILED(hr)) return hr;
+                if (selected == IID_NULL) return E_UNEXPECTED;
+            }
+            if (!plibid || *plibid == GUID_NULL) {
+                CComPtr<ITypeInfo> coclass;
+                hr = provider->GetClassInfo(&coclass.p);
+                if (FAILED(hr)) return hr;
+                if (!coclass.p) return E_UNEXPECTED;
+                CComPtr<ITypeLib> library; UINT index = 0;
+                hr = coclass->GetContainingTypeLib(&library.p, &index);
+                if (FAILED(hr)) return hr;
+                if (!library.p) return E_UNEXPECTED;
+                hr = library->GetTypeInfoOfGuid(selected, &candidate.p);
+                if (FAILED(hr)) return hr;
+            }
+        }
+        if (!candidate) {
+            const HRESULT hr = holder_.GetTI(&selected, plibid, wMajor, wMinor, LOCALE_USER_DEFAULT, &candidate.p);
+            if (FAILED(hr)) return hr;
+        }
+        if (!candidate.p) return E_UNEXPECTED;
+        TYPEATTR* attr = nullptr;
+        HRESULT hr = candidate->GetTypeAttr(&attr);
+        if (FAILED(hr)) return hr;
+        if (!attr) return E_UNEXPECTED;
+        const bool correct = attr->guid == selected && attr->typekind == TKIND_DISPATCH;
+        candidate->ReleaseTypeAttr(attr);
+        if (!correct) return TYPE_E_ELEMENTNOTFOUND;
+        bound_ = candidate;
+        hr = this->ConnectPoint(source, selected);
+        if (hr != S_OK) bound_.Release();
+        return hr;
+    }
+    HRESULT DispEventUnadvise(IUnknown* source, const IID* iid = pdiid) noexcept {
+        const HRESULT hr = Base::DispEventUnadvise(source, iid);
+        if (hr == S_OK) {
+            bound_.Release();
+            this->iid_ = pdiid ? *pdiid : IID_NULL;
+        }
+        return hr;
+    }
+    HRESULT Advise(IUnknown* source) noexcept { return DispEventAdvise(source); }
+    HRESULT Unadvise(IUnknown* source) noexcept { return DispEventUnadvise(source); }
 };
 } // namespace ATL
 
@@ -249,7 +471,11 @@ public: \
         using _SinkClass = x; \
         static const ATL::detail::EventEntry entries[] = {
 #define SINK_ENTRY_INFO(id, iid, member, handler, info) \
-    { id, &(iid), member, info, &ATL::detail::InvokeEvent<&_SinkClass::handler> },
+    { id, &(iid), member, info, &ATL::detail::InvokeMappedEvent<_SinkClass, &_SinkClass::handler> },
+#define SINK_ENTRY_EX_P(id, piid, member, handler) \
+    { id, piid, member, nullptr, &ATL::detail::InvokeMappedEvent<_SinkClass, handler> },
+#define SINK_ENTRY_EX(id, iid, member, handler) SINK_ENTRY_EX_P(id, &(iid), member, handler)
+#define SINK_ENTRY(id, member, handler) SINK_ENTRY_EX(id, IID_NULL, member, handler)
 #define END_SINK_MAP() \
     { 0, nullptr, 0, nullptr, nullptr } }; return entries; }
 #endif

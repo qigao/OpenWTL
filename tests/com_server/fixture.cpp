@@ -2,6 +2,9 @@
 #include <openatl/com_registration.h>
 #include "interfaces.h"
 #include "fixture_registry_ids.h"
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+#include "event_fixture_metadata.h"
+#endif
 
 namespace {
 using namespace OpenATL::COM;
@@ -19,9 +22,40 @@ class Value : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
               public ATL::ISupportErrorInfoImpl<&IID_OpenATLValue>,
               public ATL::IConnectionPointContainerImpl<Value>,
               public ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents>,
-              public ATL::IPropertyNotifySinkCP<Value> {
+              public ATL::IPropertyNotifySinkCP<Value>
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+              , public ATL::IConnectionPointImpl<Value, &DIID__IOpenATLDispatchEvents>,
+                public IProvideClassInfo2
+#endif
+              {
     using ValueEvents = ATL::IConnectionPointImpl<Value, &IID_OpenATLValueEvents>;
     std::atomic<LONG> property_{17};
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    HRESULT Emit(LPOLESTR name, DISPPARAMS& params) noexcept {
+        using Events = ATL::IConnectionPointImpl<Value, &DIID__IOpenATLDispatchEvents>;
+        ATL::CComPtr<IEnumConnections> snapshot;
+        HRESULT hr = Events::EnumConnections(&snapshot.p);
+        if (FAILED(hr)) return hr;
+        ATL::CComPtr<ITypeInfo> info;
+        DISPID member = DISPID_UNKNOWN;
+        for (;;) {
+            CONNECTDATA data{};
+            hr = snapshot->Next(1, &data, nullptr);
+            if (hr == S_FALSE) return S_OK;
+            if (FAILED(hr)) return hr;
+            ATL::CComPtr<IUnknown> retained; retained.Attach(data.pUnk);
+            if (!info) {
+                hr = LoadEventFixtureType(DIID__IOpenATLDispatchEvents, &info.p);
+                if (FAILED(hr)) return hr;
+                hr = info->GetIDsOfNames(&name, 1, &member);
+                if (FAILED(hr)) return hr;
+            }
+            hr = static_cast<IDispatch*>(data.pUnk)->Invoke(member, IID_NULL, LOCALE_USER_DEFAULT,
+                DISPATCH_METHOD, &params, nullptr, nullptr, nullptr);
+            if (FAILED(hr) && hr != DISP_E_MEMBERNOTFOUND) return hr;
+        }
+    }
+#endif
 public:
     DECLARE_POLY_AGGREGATABLE(Value)
     BEGIN_COM_MAP(Value)
@@ -31,10 +65,17 @@ public:
         COM_INTERFACE_ENTRY_IID(IID_OpenATLProperty, IOpenATLProperty)
         COM_INTERFACE_ENTRY(ISupportErrorInfo)
         COM_INTERFACE_ENTRY(IConnectionPointContainer)
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        COM_INTERFACE_ENTRY(IProvideClassInfo2)
+        COM_INTERFACE_ENTRY2(IProvideClassInfo, IProvideClassInfo2)
+#endif
     END_COM_MAP()
     BEGIN_CONNECTION_POINT_MAP(Value)
         CONNECTION_POINT_ENTRY(IID_IPropertyNotifySink)
         CONNECTION_POINT_ENTRY(IID_OpenATLValueEvents)
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        CONNECTION_POINT_ENTRY(DIID__IOpenATLDispatchEvents)
+#endif
     END_CONNECTION_POINT_MAP()
     DECLARE_REGISTRY_RESOURCEID(IDR_OPENATL_VALUE)
     HRESULT STDMETHODCALLTYPE GetValue(LONG* value) noexcept override {
@@ -52,16 +93,37 @@ public:
             hr = static_cast<IOpenATLValueEvents*>(data.pUnk)->OnValue(*value);
             if (FAILED(hr)) return hr;
         }
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        ATL::CComVariant args[3] = {ATL::CComVariant(L"typelib event"), ATL::CComVariant(VARIANT_TRUE), ATL::CComVariant(42L)};
+        args[1].vt = VT_BOOL; args[1].boolVal = VARIANT_TRUE;
+        DISPPARAMS params{args, nullptr, 3, 0};
+        hr = Emit(const_cast<LPOLESTR>(L"Changed"), params);
+        if (FAILED(hr)) return hr;
+        ATL::CComVariant bundle(L"retained event");
+        DISPPARAMS single{&bundle, nullptr, 1, 0};
+        hr = Emit(const_cast<LPOLESTR>(L"Bundle"), single);
+        if (FAILED(hr)) return hr;
+#endif
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetSecond(LONG* value) noexcept override {
         if (!value) return E_POINTER;
         *value = 17;
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        VARIANTARG argument{}; argument.vt = VT_BYREF | VT_I4; argument.plVal = value;
+        DISPPARAMS params{&argument, nullptr, 1, 0};
+        return Emit(const_cast<LPOLESTR>(L"Adjust"), params);
+#endif
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetExtra(LONG* value) noexcept override {
         if (!value) return E_POINTER;
         *value = 99;
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+        ATL::CComVariant args[2] = {ATL::CComVariant(99L), ATL::CComVariant(LONG(EventReady))};
+        DISPPARAMS params{args, nullptr, 2, 0};
+        return Emit(const_cast<LPOLESTR>(L"State"), params);
+#endif
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE get_Property(LONG* value) noexcept override {
@@ -74,6 +136,16 @@ public:
         property_ = value;
         return ATL::CFirePropNotifyEvent::FireOnChanged(GetUnknown(), DISPID_OpenATLProperty);
     }
+#if defined(OPENATL_ORIGINAL_COMMAP_MIDL)
+    HRESULT STDMETHODCALLTYPE GetClassInfo(ITypeInfo** output) noexcept override {
+        return LoadEventFixtureType(CLSID_EventFixtureSource, output);
+    }
+    HRESULT STDMETHODCALLTYPE GetGUID(DWORD kind, GUID* output) noexcept override {
+        if (!output) return E_POINTER; *output = GUID_NULL;
+        if (kind != GUIDKIND_DEFAULT_SOURCE_DISP_IID) return E_INVALIDARG;
+        *output = DIID__IOpenATLDispatchEvents; return S_OK;
+    }
+#endif
 };
 OBJECT_ENTRY_AUTO(CLSID_OpenATLValue, Value)
 

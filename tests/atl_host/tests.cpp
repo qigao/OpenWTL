@@ -141,11 +141,10 @@ bool events() {
     CHECK(source->advises == 2 && source->unadvises == 2 && source->refs == 1);
     return true;
 }
-class BrowserSink : public ATL::IDispEventSimpleImpl<1, BrowserSink, &DIID_DWebBrowserEvents2> {
+class BrowserSink : public ATL::IDispEventImpl<1, BrowserSink, &DIID_DWebBrowserEvents2> {
 public:
-    inline static ATL::_ATL_FUNC_INFO document = {CC_STDCALL, VT_EMPTY, 2, {VT_DISPATCH, VT_BYREF | VT_VARIANT}};
     BEGIN_SINK_MAP(BrowserSink)
-        SINK_ENTRY_INFO(1, DIID_DWebBrowserEvents2, 259, Document, &document)
+        SINK_ENTRY(1, 259, &BrowserSink::Document)
     END_SINK_MAP()
     void __stdcall Document(IDispatch*, VARIANT* value) { if (value && value->vt == VT_BSTR) ++documents; }
     int documents = 0;
