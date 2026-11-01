@@ -191,7 +191,7 @@ OpenATL build/runtime tests:
 | --- | --- |
 | COMMap | Original modules/resources and per-user two-DLL activation are admitted in existing images; untouched project builds, original output/export layout and exact tear-off member/layout remain open |
 | ATLCollections | `ICollectionOnSTLImpl`, `CComEnumOnSTL`, complete registrar APIs and generated/imported type-library integration |
-| ATLSafeArray | `atlsafe.h` / `CComSafeArray`, complete control/server support and whole-project generated TypeLib integration |
+| ATLSafeArray | Original ArrayManager class/IDL/RGS and registered array dispatch are admitted in the existing STA case; original DLL entrypoints/resources/project deployment and complete internal-wrapper/control support remain open |
 
 Adding `atlcom.h` alone does not implement these contracts. The implemented
 object/map, basic aggregation and tear-off subsets remain covered by OpenATL's native tests;
@@ -291,3 +291,27 @@ objects and native COM caches retire before verified FreeLibrary unmapping.
 Preexisting sample keys are rejected. This is native per-user integration in
 existing binaries, not untouched VCXPROJ/solution builds or original binary
 filename/export-layout compatibility. All 37 whole applications stay unqualified.
+
+
+## Original Microsoft ArrayManager class admission
+
+Five unchanged original files from the same pinned VCSamples commit are retained
+under microsoft_atl/atlsafearray: ArrayManager.cpp/.h, stdafx.h, resource.h and
+AtlSafeArray.idl. The existing canonical ArrayManager.rgs fixture is reused.
+The existing original_sources.json/check_idl.py graph now checks all 36 blobs;
+no separate checksum detector, target, test mode or workflow is introduced.
+Native Windows SDK MIDL generates the actual declarations/IIDs/TypeLib, with
+UUID bindings derived from generated annotations for MinGW. The TypeLib is
+embedded as resource 3 in existing test images.
+
+The existing STA events case compiles the original class methods unchanged.
+Its separate harness checks real factories/CoCreateInstance, original selected
+RGS registration in an isolated HKCU root, IObjectSafety options and explicit
+per-user TypeLib install/uninstall. Actual registered dispatch executes Add,
+Change, both Remove paths and GetArray with VARIANT SAFEARRAY results. Native
+snapshots have independent element ownership and survive object/module release.
+Missing registered metadata fails without an image fallback. Original methods
+ignore some HRESULTs internally; this admission covers valid method inputs and
+does not rewrite their failure policy. The own wrapper core tests separately
+check bounds/type/lock failures. Full original AtlSafeArray.cpp/.rc/.def/project
+and DLL deployment are not admitted; all 37 whole applications remain unqualified.

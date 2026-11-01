@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+bool RunAtlSafeArrayTests();
+
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ATL_COMPAT_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
 inline constexpr IID iidDerived = {0xf9cb25d1, 0x2573, 0x4af4, {0xa4, 0x2e, 0x1e, 0x0a, 0x21, 0xcc, 0x90, 0x20}};
@@ -1152,6 +1154,7 @@ bool RunAtlCompatibilityTests() {
     CHECK(ComMapChain());
     CHECK(Aggregation());
     CHECK(PolyObjects());
+    CHECK(RunAtlSafeArrayTests());
     CHECK(AutoAggregateWithoutCom());
     CHECK(TearOffLifetime());
     CHECK(TearOffFailuresAndThreads());

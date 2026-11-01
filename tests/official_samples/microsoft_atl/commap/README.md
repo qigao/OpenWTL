@@ -2,7 +2,8 @@
 
 The snapshot comes from `microsoft/VCSamples@9e1d4475555b76a17a3568369867f1d7b6cc6126`,
 `VC2010Samples/ATL/General/commap`. `original_sources.json` records the exact Git
-blob SHA of all 30 original files: COMMap.idl, Outer/Chain source and headers,
+blob SHA of the 30 COMMap original files plus six ArrayManager source/fixture
+inputs (36 total): COMMap.idl, Outer/Chain source and headers,
 premap/resource headers, the nested aggreg classes/headers/Aggreg.idl, and all
 six RGS scripts and both module .cpp/.rc/.def sets. Outer.rgs/Chain.rgs reuse the existing canonical fixtures.
 `check_idl.py` checks every byte before native generation/build. Attributes

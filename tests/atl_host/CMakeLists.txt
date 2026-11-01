@@ -14,7 +14,11 @@ endforeach()
 if(CMAKE_HOST_WIN32)
   set(_commap_original "${PROJECT_SOURCE_DIR}/tests/official_samples/microsoft_atl/commap")
   set(_commap_generated "${PROJECT_BINARY_DIR}/tests/com_server/microsoft-commap")
+  set(_safe_original "${PROJECT_SOURCE_DIR}/tests/official_samples/microsoft_atl/atlsafearray")
+  set(_safe_generated "${PROJECT_BINARY_DIR}/tests/com_server/microsoft-atlsafearray")
   target_sources(openatl_activex PRIVATE
+    "${_safe_original}/ArrayManager.cpp" "${_safe_original}/safearray_native.cpp"
+    "${_safe_generated}/AtlSafeArray_i.c"
     "${_commap_original}/Outer.cpp" "${_commap_original}/Chain.cpp"
     "${_commap_original}/aggreg/Agg.cpp" "${_commap_original}/aggreg/AggBlind.cpp"
     "${_commap_original}/aggreg/AutoAgg.cpp" "${_commap_original}/aggreg/AutoAggB.cpp"
@@ -22,19 +26,20 @@ if(CMAKE_HOST_WIN32)
     "${_commap_generated}/COMMap_i.c" "${_commap_generated}/aggreg/aggreg_i.c"
     "${PROJECT_BINARY_DIR}/tests/com_server/fixture_typelib.rc")
   set_source_files_properties("${_commap_generated}/COMMap_i.c"
-    "${_commap_generated}/aggreg/aggreg_i.c" PROPERTIES GENERATED TRUE LANGUAGE CXX)
+    "${_commap_generated}/aggreg/aggreg_i.c" "${_safe_generated}/AtlSafeArray_i.c"
+    PROPERTIES GENERATED TRUE LANGUAGE CXX)
   target_include_directories(openatl_activex PRIVATE
-    "${_commap_generated}" "${_commap_generated}/aggreg")
+    "${_commap_generated}" "${_commap_generated}/aggreg" "${_safe_generated}")
   # The original premap/preagg headers select apartment threading. Keep every
   # translation unit of this STA test binary on the same ATL type definitions.
   target_compile_definitions(openatl_activex PRIVATE
     _ATL_APARTMENT_THREADED= OPENATL_ORIGINAL_COMMAP_CLASSES=1)
   set(_commap_registry_rc "${CMAKE_CURRENT_BINARY_DIR}/original_commap_registry.rc")
   file(WRITE "${_commap_registry_rc}"
-    "1 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Outer.rgs\"\n2 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Chain.rgs\"\n")
+    "1 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Outer.rgs\"\n2 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/Chain.rgs\"\n102 REGISTRY \"${PROJECT_SOURCE_DIR}/tests/atl_rgs/fixtures/ArrayManager.rgs\"\n")
   target_sources(openatl_activex PRIVATE "${_commap_registry_rc}")
   set_source_files_properties("${PROJECT_BINARY_DIR}/tests/com_server/fixture_typelib.rc"
-    PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb")
+    PROPERTIES OBJECT_DEPENDS "${_commap_generated}/COMMap.tlb;${_commap_generated}/aggreg/Aggreg.tlb;${_safe_generated}/AtlSafeArray.tlb")
   add_dependencies(openatl_activex openatl_microsoft_commap_midl openatl_com_server_fixture
     openatl_unload_fixture openatl_unload_probe)
   set_tests_properties(openatl.activex_events PROPERTIES RESOURCE_LOCK openatl_com_server_registration)
