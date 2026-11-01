@@ -1120,3 +1120,18 @@ child contents are queried after native construction. Existing ActiveX load-fail
 exactly when an early message attached the C++ owner. Native storage/stream/sink
 regressions remain in their existing modes and 25-second budgets. This software
 painting does not invoke a printer or hardware HSP.
+# BSTR stream foundation (post-0.1.0, qualification pending)
+
+`CComBSTR::ReadFromStream` / `WriteToStream` use a Windows ULONG byte
+count followed by BSTR bytes and the two-byte terminator. Zero denotes
+a null BSTR; an allocated empty BSTR has a count of two. Embedded NULs
+and odd-byte BSTR payloads are counted, not scanned. Short reads/writes
+return STG_E_READFAULT/STG_E_WRITEFAULT; failed HRESULTs are propagated.
+Invalid terminators are rejected. Reads stage native BSTR ownership and
+preserve the previous value on failure; the stream position is not rolled
+back. Writes can leave a partial record. Callers must bound untrusted
+stream sizes before invoking this allocation-based API.
+
+This is the first subset of #94. VARIANT streams, property-map stream
+persistence and IPersistStreamInitImpl remain unimplemented. #95–#97 are
+reactivated independent tracks, not completed by these primitives.

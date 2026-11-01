@@ -405,6 +405,46 @@ public:
         return ::SysStringByteLen(m_str);
     }
 
+    HRESULT WriteToStream(IStream* stream) noexcept
+    {
+        if (!stream) return E_POINTER;
+        const ULONG bytes = ByteLength();
+        if (m_str && bytes > (std::numeric_limits<ULONG>::max)() - sizeof(OLECHAR))
+            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+        const ULONG stored = m_str ? bytes + sizeof(OLECHAR) : 0;
+        ULONG done = 0;
+        HRESULT hr = stream->Write(&stored, sizeof(stored), &done);
+        if (FAILED(hr)) return hr;
+        if (done != sizeof(stored)) return STG_E_WRITEFAULT;
+        if (!stored) return S_OK;
+        done = 0;
+        hr = stream->Write(m_str, stored, &done);
+        if (FAILED(hr)) return hr;
+        return done == stored ? S_OK : STG_E_WRITEFAULT;
+    }
+
+    HRESULT ReadFromStream(IStream* stream) noexcept
+    {
+        if (!stream) return E_POINTER;
+        ULONG stored = 0, done = 0;
+        HRESULT hr = stream->Read(&stored, sizeof(stored), &done);
+        if (FAILED(hr)) return hr;
+        if (done != sizeof(stored)) return STG_E_READFAULT;
+        if (!stored) { Empty(); return S_OK; }
+        if (stored < sizeof(OLECHAR)) return E_FAIL;
+        const ULONG bytes = stored - sizeof(OLECHAR);
+        BSTR staged = ::SysAllocStringByteLen(nullptr, bytes);
+        if (!staged) return E_OUTOFMEMORY;
+        done = 0;
+        hr = stream->Read(staged, stored, &done);
+        if (SUCCEEDED(hr) && done != stored) hr = STG_E_READFAULT;
+        const auto raw = reinterpret_cast<const unsigned char*>(staged);
+        if (SUCCEEDED(hr) && (raw[bytes] || raw[bytes + 1])) hr = E_FAIL;
+        if (FAILED(hr)) { ::SysFreeString(staged); return hr; }
+        Attach(staged);
+        return S_OK;
+    }
+
     BSTR Copy() const
     {
         if (m_str == NULL)

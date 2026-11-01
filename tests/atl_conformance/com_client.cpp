@@ -48,6 +48,38 @@ static bool no_apartment() {
     return ::CoGetContextToken(&context)==CO_E_NOTINITIALIZED;
 }
 
+// Delegates storage to Windows while injecting one short or failed transfer.
+struct StreamTransferFault final : IStream {
+    IStream* inner;
+    unsigned calls = 0, failAt;
+    HRESULT result;
+    StreamTransferFault(IStream* s, unsigned at, HRESULT hr)
+        : inner(s), failAt(at), result(hr) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE Read(void* p, ULONG n, ULONG* done) override {
+        if (++calls == failAt) { if (done) *done = 0; return result; }
+        return inner->Read(p,n,done);
+    }
+    HRESULT STDMETHODCALLTYPE Write(const void* p, ULONG n, ULONG* done) override {
+        if (++calls == failAt) { if (done) *done = 0; return result; }
+        return inner->Write(p,n,done);
+    }
+    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER p,DWORD o,ULARGE_INTEGER* n) override { return inner->Seek(p,o,n); }
+    HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER n) override { return inner->SetSize(n); }
+    HRESULT STDMETHODCALLTYPE CopyTo(IStream*,ULARGE_INTEGER,ULARGE_INTEGER*,ULARGE_INTEGER*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Revert() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER,ULARGE_INTEGER,DWORD) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER,ULARGE_INTEGER,DWORD) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Stat(STATSTG* s,DWORD f) override { return inner->Stat(s,f); }
+    HRESULT STDMETHODCALLTYPE Clone(IStream**) override { return E_NOTIMPL; }
+};
+
 
 // In-process test double only: never registered, activated or published.
 // It rejects QueryInterface to check failed COM identity claims.
@@ -134,6 +166,79 @@ static int com_client_ownership_regressions(IGlobalInterfaceTable* real) {
     ATL::CComBSTR negative(-1,L"hello");
     if (negative.m_str != nullptr)
         return failure(61, "BSTR_negative_constructor", E_FAIL);
+
+    ATL::CComPtr<IStream> strings;
+    hr = ::CreateStreamOnHGlobal(nullptr, TRUE, &strings);
+    if (FAILED(hr)) return failure(75, "BSTR_stream_create", hr);
+    if (a.WriteToStream(strings) != S_OK)
+        return failure(76, "BSTR_stream_write", E_FAIL);
+    LARGE_INTEGER start{};
+    ULONG stored = 0, read = 0;
+    OLECHAR raw[4]{};
+    if (strings->Seek(start, STREAM_SEEK_SET, nullptr) != S_OK ||
+        strings->Read(&stored, sizeof(stored), &read) != S_OK ||
+        read != sizeof(stored) || stored != sizeof(raw) ||
+        strings->Read(raw, sizeof(raw), &read) != S_OK || read != sizeof(raw) ||
+        std::memcmp(raw, embeddedA, sizeof(embeddedA)) || raw[3])
+        return failure(77, "BSTR_stream_independent_bytes", E_FAIL);
+    ATL::CComBSTR restored(L"previous");
+    if (strings->Seek(start, STREAM_SEEK_SET, nullptr) != S_OK ||
+        restored.ReadFromStream(strings) != S_OK || restored != a ||
+        restored.ReadFromStream(strings) != STG_E_READFAULT || restored != a ||
+        restored.ReadFromStream(nullptr) != E_POINTER ||
+        restored.WriteToStream(nullptr) != E_POINTER)
+        return failure(78, "BSTR_stream_read_and_truncation", E_FAIL);
+
+    // Independent producers: null, allocated empty, odd-byte binary BSTR,
+    // malformed count/terminator, and incomplete records.
+    const unsigned char records[][9] = {
+        {0,0,0,0}, {2,0,0,0,0,0}, {5,0,0,0,0x41,0,0x42,0,0},
+        {1,0,0,0}, {2,0,0,0,1,0}, {4,0,0,0,0x41,0}, {0,0}
+    };
+    const ULONG sizes[] = {4,6,9,4,6,6,2};
+    for (unsigned i=0;i<7;++i) {
+        ATL::CComPtr<IStream> fixture;
+        if (::CreateStreamOnHGlobal(nullptr,TRUE,&fixture) != S_OK ||
+            fixture->Write(records[i],sizes[i],nullptr) != S_OK ||
+            fixture->Seek(start,STREAM_SEEK_SET,nullptr) != S_OK)
+            return failure(79,"BSTR_fixture_setup",E_FAIL);
+        ATL::CComBSTR value(L"keep");
+        hr = value.ReadFromStream(fixture);
+        if (i<3) {
+            const ULONG bytes[] = {0,0,3};
+            if (hr != S_OK || value.ByteLength()!=bytes[i] ||
+                (i==0 ? value.m_str!=nullptr : value.m_str==nullptr) ||
+                (i==2 && std::memcmp(value.m_str,records[i]+4,3)))
+                return failure(80,"BSTR_independent_producer",hr);
+            ATL::CComPtr<IStream> encoded;
+            unsigned char actual[9]{};
+            if (::CreateStreamOnHGlobal(nullptr,TRUE,&encoded) != S_OK ||
+                value.WriteToStream(encoded)!=S_OK ||
+                encoded->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK ||
+                encoded->Read(actual,sizes[i],&read)!=S_OK || read!=sizes[i] ||
+                std::memcmp(actual,records[i],sizes[i]))
+                return failure(81,"BSTR_fixture_reencode",E_FAIL);
+        } else if (hr != (i<5 ? E_FAIL : STG_E_READFAULT) ||
+                   std::wcscmp(value.m_str,L"keep"))
+            return failure(82,"BSTR_malformed_preserves_owner",hr);
+    }
+    for (unsigned at=1;at<=2;++at) {
+        const HRESULT results[] = {S_OK,S_FALSE,E_ACCESSDENIED};
+        for (HRESULT injected : results) {
+            if (strings->Seek(start,STREAM_SEEK_SET,nullptr)!=S_OK)
+                return failure(83,"BSTR_fault_rewind",E_FAIL);
+            StreamTransferFault reader(strings,at,injected);
+            ATL::CComBSTR value(L"keep");
+            hr=value.ReadFromStream(&reader);
+            if (hr != (FAILED(injected)?injected:STG_E_READFAULT) ||
+                std::wcscmp(value.m_str,L"keep"))
+                return failure(84,"BSTR_injected_read",hr);
+            StreamTransferFault writer(strings,at,injected);
+            hr=a.WriteToStream(&writer);
+            if (hr != (FAILED(injected)?injected:STG_E_WRITEFAULT))
+                return failure(85,"BSTR_injected_write",hr);
+        }
+    }
 
     ATL::CComVariant va;
     va.vt = VT_BSTR;
