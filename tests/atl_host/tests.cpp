@@ -271,7 +271,7 @@ bool propertyBrowsing() {
         state.failure = mode; text = reinterpret_cast<BSTR>(static_cast<UINT_PTR>(1));
         const HRESULT hr = browser->GetDisplayString(11, &text);
         CHECK((mode <= 5 ? hr == failures[mode - 1] : FAILED(hr)) && !text);
-        CHECK(probe->AddRef() == 2 && probe->Release() == 1); // Result VARIANT releases even on failure/throw.
+        CHECK(probe.p->AddRef() == 2 && probe.p->Release() == 1); // Result VARIANT releases even on failure/throw.
     }
     state.failure = 0; state.reenter = true; state.number = 271;
     CHECK(browser->GetDisplayString(11, &text) == S_OK && !::wcscmp(text, L"271"));
