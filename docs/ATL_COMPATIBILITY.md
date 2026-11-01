@@ -543,8 +543,8 @@ handler while it is executing. The adapter pins the active ATL module. Setters
 reject another thread, recheck HWND retirement after retaining an external
 object, and allow clearing through a retained host interface after destruction.
 Clearing the UI handler restores the existing ambient/default behavior and
-external dispatch object. Windowless activation, OLE menu merging, property
-frames and full composite controls are separate unfinished work.
+external dispatch object. Windowless activation, OLE menu merging, the full ATL
+property-page class framework and composite controls remain unfinished.
 
 Existing lifecycle cases call all 15 native UI methods with a dispatch-only
 handler, verify negative coordinates, high-bit accelerator values, native string
@@ -560,6 +560,48 @@ References: [IDocHostUIHandlerDispatch](https://learn.microsoft.com/en-us/cpp/at
 [CAxWindow setters](https://learn.microsoft.com/en-us/cpp/atl/reference/caxwindow-class),
 [native host UI contract](https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa753260(v=vs.85)),
 [MSHTML external object](https://learn.microsoft.com/en-us/previous-versions/aa741462(v=vs.85)).
+
+## Native property frames
+
+IOleControlSite::ShowPropertyFrame displays the hosted control's own property
+pages through ISpecifyPropertyPages and native OleCreatePropertyFrame. The
+existing host HWND is the owner and one captured ambient LCID is passed to the
+native modal frame. A successful short GetUserType supplies its caption; absent
+or failed optional caption metadata uses a default title. The control supplies
+registered native IPropertyPage classes; Windows owns their creation, object
+binding, activation, modal loop, Apply/Cancel and teardown. No second property
+sheet implementation or Microsoft ATL fallback is used.
+
+The operation retains the host and current control through callbacks and the
+native modal call. It rejects another thread, recursive display and calls during
+control creation/closing. Successful external calls are followed by a check for
+HWND retirement or a changed control. Retirement reports E_ABORT; a subsequent
+call through a retained, disconnected site returns CO_E_OBJNOTCONNECTED. Query
+and GetPages failures propagate. GetPages must return S_OK, an empty page list
+returns E_NOTIMPL, and a nonempty list with a null array fails E_UNEXPECTED.
+All page-list/title CoTaskMem allocations are released even on failure. Native
+frame failures propagate; a successful call means the native modal frame has
+closed, including a user cancellation. It does not imply that Apply occurred.
+
+Existing lifecycle cases register a repository-owned IPropertyPage factory in
+COM's process class table. A real native property frame activates its child UI,
+queues an actual OK/Cancel button click, and applies an edit through the bound
+control's native IOleObject interface. Cases check object identity, LCID,
+creation-time and discovery/page callback reentrancy, commit vs cancellation,
+owner enabled-state restoration, reopening, page/site/object teardown, caption
+failure fallback, empty/malformed/failed page lists, wrong-thread calls and
+HWND destruction during interface/page discovery. Existing executable/modes,
+stdout/stderr contracts, 25-second CTest budgets and workflows are unchanged.
+Real printing and hardware HSP remain outside CI; all 36 pinned Microsoft blobs
+and whole-application admission remain unchanged.
+
+This container feature does not implement IPropertyPageImpl, CAxPropertyPageImpl,
+ATL property-map macros, control splitting or full composite-control behavior.
+
+References: [IOleControlSite::ShowPropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-iolecontrolsite-showpropertyframe),
+[OleCreatePropertyFrame](https://learn.microsoft.com/en-us/windows/win32/api/olectl/nf-olectl-olecreatepropertyframe),
+[IPropertyPage::SetObjects](https://learn.microsoft.com/en-us/windows/win32/api/ocidl/nf-ocidl-ipropertypage-setobjects),
+[REGCLS process registration](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/ne-combaseapi-regcls).
 
 ## Sink-map subscriptions
 
