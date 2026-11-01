@@ -6,14 +6,15 @@
 
 #pragma once
 
-#include "atldef.h"
-
+#include "openatl/platform.h"
 #include <ole2.h>
 #include <memory>
 #include <limits>
 #include <cwchar>
 #include <cstring>
 #include <exception>
+// Initialize the native SDK and C++ runtime before the legacy _MSC_VER shim.
+#include "atldef.h"
 #include "openatl/text_encoding.h"
 
 namespace ATL {
@@ -723,5 +724,9 @@ public:
 };
 
 } // namespace ATL
+
+#ifndef _ATL_NO_AUTOMATIC_NAMESPACE
+using namespace ATL;
+#endif
 
 #endif // __ATLCOMCLI_H__
