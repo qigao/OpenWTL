@@ -284,8 +284,22 @@ public:
         m_str.assign(buffer.data(), static_cast<size_t>(written));
     }
 
+    // In UNICODE builds Win32's LoadString macro expands this method's name
+    // to LoadStringW. Do not declare both: they become duplicate methods.
+    // The resource must be copied using its counted UTF-16 length; its
+    // representation is not necessarily NUL-terminated and can exceed 255.
     BOOL LoadString(UINT nID)
     {
+#ifdef UNICODE
+        LPCWSTR resource = nullptr;
+        const int length = ::LoadStringW(_AtlBaseModule.GetResourceInstance(),
+                                         nID,
+                                         reinterpret_cast<LPWSTR>(&resource), 0);
+        if (length <= 0 || !resource)
+            return FALSE;
+        m_str.assign(resource, static_cast<size_t>(length));
+        return TRUE;
+#else
         TCHAR szBuf[256];
         int nLen = ::LoadString(_AtlBaseModule.GetResourceInstance(), nID, szBuf, 256);
         if (nLen > 0) {
@@ -293,6 +307,7 @@ public:
             return TRUE;
         }
         return FALSE;
+#endif
     }
 
     int Replace(const TCHAR* pszOld, const TCHAR* pszNew)

@@ -128,7 +128,9 @@ if(OPENATL_BUILD_QUALIFICATION)
 
   # Repository-owned ATL utilities (file/string/sync), independent of COM.
   # ole32 belongs ONLY to this test to verify apartment stays uninitialized.
-  add_executable(openatl_atl_core tests/atl_conformance/atl_core.cpp)
+  add_executable(openatl_atl_core
+    tests/atl_conformance/atl_core.cpp
+    tests/atl_conformance/cstring_resources.rc)
   target_link_libraries(openatl_atl_core PRIVATE OpenWTL::WTL ole32 advapi32)
   add_test(NAME openatl.atl_core_no_com COMMAND openatl_atl_core)
 

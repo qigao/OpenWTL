@@ -77,6 +77,39 @@ static int strings() {
     if(converted.Compare(L"ASCII-OK")!=0)
         return failure(20,"ANSI_to_Unicode_NUL");
 #endif
+#ifdef UNICODE
+    // Real Win32 STRINGTABLE data linked into this already existing native
+    // ATL core test. The 320-character case must not be truncated at 255.
+    const std::wstring longExpected(320, L'A');
+    ATL::CString resource(L"old-value");
+    if (!resource.LoadStringW(43001) ||
+        resource.GetLength() != 320 ||
+        resource.Compare(longExpected.c_str()) != 0)
+        return failure(22, "CString_LoadStringW_long");
+
+    resource = L"before-alias";
+    if (!resource.LoadString(43001) ||
+        resource.GetLength() != 320 ||
+        resource.Compare(longExpected.c_str()) != 0)
+        return failure(23, "CString_LoadString_long_alias");
+
+    if (!resource.LoadStringW(43002) ||
+        resource.Compare(L"\u4e2d\u6587") != 0)
+        return failure(24, "CString_LoadStringW_CJK");
+
+    const wchar_t embedded[] = {L'A', 0, L'B'};
+    if (!resource.LoadStringW(43003) ||
+        resource.GetLength() != 3 ||
+        std::memcmp(resource.GetString(), embedded, sizeof(embedded)) != 0)
+        return failure(25, "CString_LoadStringW_embedded_NUL");
+
+    resource = L"existing";
+    if (resource.LoadStringW(43031) ||
+        resource.Compare(L"existing") != 0 ||
+        resource.LoadString(43031) ||
+        resource.Compare(L"existing") != 0)
+        return failure(26, "CString_LoadString_missing_does_not_mutate");
+#endif
     return 0;
 }
 
