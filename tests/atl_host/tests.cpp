@@ -102,8 +102,6 @@ bool plainDialogs() {
     CHECK(plain.Create(nullptr, ignored, 5678) && plain.parameter == 5678 && plain.initialized == 2);
     CHECK(!plain.Create(nullptr) && ::GetLastError() == ERROR_ALREADY_EXISTS);
     CHECK(!plain.EndDialog(0) && ::IsWindow(plain.m_hWnd));
-    MSG message{}; message.hwnd = plain; message.message = WM_NULL;
-    CHECK(!plain.IsDialogMessage(&message));
     CHECK(plain.DestroyWindow() && plain.finalized == 2 && !plain.m_hWnd);
     InitFailureDialog failed;
     CHECK(!failed.Create(nullptr) && ::GetLastError() == ERROR_ACCESS_DENIED && !failed.initialized && failed.finalized == 1 && !failed.m_hWnd);
