@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cwchar>
 #include <thread>
+#include <stdexcept>
 
 #define REQUIRE(x) do { if (!(x)) { std::fprintf(stderr, "HOST_LIFECYCLE_FAIL line=%d: %s\n", __LINE__, #x); return false; } } while (0)
 namespace {
@@ -773,6 +774,199 @@ bool propertyFrames() {
     REQUIRE(module.GetLockCount() == 0);
     return true;
 }
+inline constexpr CLSID StorageClass = {0x772f940f,0xd3ca,0x49d8,{0x97,0xab,0x25,0x19,0x0f,0x8c,0x69,0x11}};
+struct StorageState {
+    std::vector<BYTE> payload{1,2,3,4,5,6,7,8};
+    bool dirty = true, initialized = false, valid = true, reenter = true;
+    int initializedCalls = 0, loads = 0, saves = 0, dirtyCalls = 0, failure = 0, queryFailure = 0, destroyed = 0;
+    BOOL clearDirty = FALSE;
+    IPersistStorage* owner = nullptr;
+    IPersistStorage* dropOwner = nullptr;
+    HRESULT Enter() {
+        if (reenter) {
+            CLSID id{};
+            valid = owner && owner->GetClassID(&id) == S_OK && id == StorageClass &&
+                owner->HandsOffStorage() == S_OK && owner->SaveCompleted(nullptr) == S_OK && valid;
+        }
+        if (dropOwner) { auto release = dropOwner; dropOwner = nullptr; release->Release(); }
+        if (failure == 1) return E_ACCESSDENIED;
+        if (failure == 2) throw ATL::CAtlException(E_ABORT);
+        if (failure == 3) throw std::bad_alloc();
+        if (failure == 4) throw std::runtime_error("storage codec failure");
+        return S_OK;
+    }
+};
+template<class T> class StorageCodec : public IPersistStreamInit {
+public:
+    HRESULT STDMETHODCALLTYPE GetClassID(CLSID* id) override { if (!id) return E_POINTER; *id = StorageClass; return S_OK; }
+    HRESULT STDMETHODCALLTYPE IsDirty() override {
+        auto& state = *static_cast<T*>(this)->state; ++state.dirtyCalls;
+        const HRESULT hr = state.Enter(); return hr == S_OK ? (state.dirty ? S_OK : S_FALSE) : hr;
+    }
+    HRESULT STDMETHODCALLTYPE InitNew() override {
+        auto& state = *static_cast<T*>(this)->state; ++state.initializedCalls;
+        const HRESULT hr = state.Enter(); if (hr != S_OK) return hr;
+        if (state.initialized) return CO_E_ALREADYINITIALIZED;
+        state.initialized = true; state.dirty = true; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetSizeMax(ULARGE_INTEGER* size) override {
+        if (!size) return E_POINTER; size->QuadPart = static_cast<T*>(this)->state->payload.size(); return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Load(IStream* stream) override {
+        auto& state = *static_cast<T*>(this)->state; ++state.loads;
+        HRESULT hr = state.Enter(); if (hr != S_OK) return hr;
+        if (!stream) return E_POINTER;
+        LARGE_INTEGER zero{}; ULARGE_INTEGER position{}; STATSTG info{};
+        if (stream->Seek(zero, STREAM_SEEK_CUR, &position) != S_OK || position.QuadPart ||
+            stream->Stat(&info, STATFLAG_NONAME) != S_OK || info.cbSize.QuadPart > 1024) return E_FAIL;
+        std::vector<BYTE> data(static_cast<size_t>(info.cbSize.QuadPart)); ULONG read = 0;
+        hr = stream->Read(data.data(), static_cast<ULONG>(data.size()), &read);
+        if (FAILED(hr)) return hr; if (read != data.size()) return STG_E_READFAULT;
+        state.payload = std::move(data); state.dirty = false; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Save(IStream* stream, BOOL clear) override {
+        auto& state = *static_cast<T*>(this)->state; ++state.saves; state.clearDirty = clear;
+        HRESULT hr = state.Enter(); if (hr != S_OK) return hr;
+        if (!stream) return E_POINTER;
+        LARGE_INTEGER zero{}; ULARGE_INTEGER position{}; STATSTG info{};
+        if (stream->Seek(zero, STREAM_SEEK_CUR, &position) != S_OK || position.QuadPart ||
+            stream->Stat(&info, STATFLAG_NONAME) != S_OK || info.cbSize.QuadPart) return E_FAIL;
+        ULONG written = 0; hr = stream->Write(state.payload.data(), static_cast<ULONG>(state.payload.size()), &written);
+        if (FAILED(hr)) return hr; if (written != state.payload.size()) return STG_E_WRITEFAULT;
+        if (clear) state.dirty = false; return S_OK;
+    }
+};
+struct StoragePrefix { virtual ~StoragePrefix() = default; ULONG padding[3]{}; };
+class StorageObject : public StoragePrefix, public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>,
+                      public StorageCodec<StorageObject>, public ATL::IPersistStorageImpl<StorageObject> {
+public:
+    using Codec = StorageCodec<StorageObject>;
+    StorageState* state = nullptr;
+    ~StorageObject() { if (state) ++state->destroyed; }
+    static REFCLSID GetObjectCLSID() noexcept { return StorageClass; }
+    BEGIN_COM_MAP(StorageObject)
+        if (iid == IID_IPersistStreamInit && state && state->queryFailure)
+            return state->queryFailure == 1 ? E_NOINTERFACE : S_FALSE;
+        COM_INTERFACE_ENTRY(IPersistStreamInit)
+        COM_INTERFACE_ENTRY2(IPersist, Codec)
+        COM_INTERFACE_ENTRY(IPersistStorage)
+    END_COM_MAP()
+};
+bool CreateStoredObject(StorageState& state, ATL::CComPtr<IPersistStorage>& output) {
+    ATL::CComObject<StorageObject>* object = nullptr;
+    REQUIRE(ATL::CComObject<StorageObject>::CreateInstance(&object) == S_OK && object);
+    object->state = &state; object->AddRef();
+    REQUIRE(object->QueryInterface(IID_IPersistStorage, reinterpret_cast<void**>(&output)) == S_OK);
+    object->Release(); state.owner = output; return true;
+}
+// Observe COM lifetime only; every storage operation still executes in Windows.
+class StorageMonitor : public ATL::CComObjectRootEx<ATL::CComMultiThreadModel>, public IStorage {
+public:
+    ATL::CComPtr<IStorage> native;
+    int* destroyed = nullptr;
+    ~StorageMonitor() { if (destroyed) ++*destroyed; }
+    BEGIN_COM_MAP(StorageMonitor)
+        COM_INTERFACE_ENTRY(IStorage)
+    END_COM_MAP()
+    HRESULT STDMETHODCALLTYPE CreateStream(const OLECHAR* name, DWORD mode, DWORD a, DWORD b, IStream** out) override { return native->CreateStream(name,mode,a,b,out); }
+    HRESULT STDMETHODCALLTYPE OpenStream(const OLECHAR* name, void* a, DWORD mode, DWORD b, IStream** out) override { return native->OpenStream(name,a,mode,b,out); }
+    HRESULT STDMETHODCALLTYPE CreateStorage(const OLECHAR* name, DWORD mode, DWORD a, DWORD b, IStorage** out) override { return native->CreateStorage(name,mode,a,b,out); }
+    HRESULT STDMETHODCALLTYPE OpenStorage(const OLECHAR* name, IStorage* priority, DWORD mode, SNB exclude, DWORD reserved, IStorage** out) override { return native->OpenStorage(name,priority,mode,exclude,reserved,out); }
+    HRESULT STDMETHODCALLTYPE CopyTo(DWORD count, const IID* ids, SNB exclude, IStorage* out) override { return native->CopyTo(count,ids,exclude,out); }
+    HRESULT STDMETHODCALLTYPE MoveElementTo(const OLECHAR* name, IStorage* target, const OLECHAR* to, DWORD flags) override { return native->MoveElementTo(name,target,to,flags); }
+    HRESULT STDMETHODCALLTYPE Commit(DWORD flags) override { return native->Commit(flags); }
+    HRESULT STDMETHODCALLTYPE Revert() override { return native->Revert(); }
+    HRESULT STDMETHODCALLTYPE EnumElements(DWORD a, void* b, DWORD c, IEnumSTATSTG** out) override { return native->EnumElements(a,b,c,out); }
+    HRESULT STDMETHODCALLTYPE DestroyElement(const OLECHAR* name) override { return native->DestroyElement(name); }
+    HRESULT STDMETHODCALLTYPE RenameElement(const OLECHAR* name, const OLECHAR* to) override { return native->RenameElement(name,to); }
+    HRESULT STDMETHODCALLTYPE SetElementTimes(const OLECHAR* name, const FILETIME* a, const FILETIME* b, const FILETIME* c) override { return native->SetElementTimes(name,a,b,c); }
+    HRESULT STDMETHODCALLTYPE SetClass(REFCLSID id) override { return native->SetClass(id); }
+    HRESULT STDMETHODCALLTYPE SetStateBits(DWORD bits, DWORD mask) override { return native->SetStateBits(bits,mask); }
+    HRESULT STDMETHODCALLTYPE Stat(STATSTG* info, DWORD flags) override { return native->Stat(info,flags); }
+};
+bool storagePersistence() {
+    ATL::CAtlModule module;
+    int mediumDestroyed = 0;
+    StorageState source, target;
+    ATL::CComPtr<IPersistStorage> save, load;
+    REQUIRE(CreateStoredObject(source, save) && CreateStoredObject(target, load));
+    ATL::CComPtr<IUnknown> identity, fromStream;
+    ATL::CComPtr<IPersistStreamInit> streamFace;
+    REQUIRE(save->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity)) == S_OK &&
+        save->QueryInterface(IID_IPersistStreamInit, reinterpret_cast<void**>(&streamFace)) == S_OK &&
+        streamFace->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&fromStream)) == S_OK && identity.p == fromStream.p);
+    CLSID id{}; REQUIRE(save->GetClassID(&id) == S_OK && id == StorageClass && save->GetClassID(nullptr) == E_POINTER);
+    REQUIRE(save->IsDirty() == S_OK && save->InitNew(nullptr) == E_POINTER &&
+        save->Load(nullptr) == E_POINTER && save->Save(nullptr, TRUE) == E_POINTER);
+    ATL::CComPtr<ILockBytes> bytes;
+    REQUIRE(::CreateILockBytesOnHGlobal(nullptr, TRUE, &bytes) == S_OK);
+    ATL::CComPtr<IStorage> storage;
+    REQUIRE(::StgCreateDocfileOnILockBytes(bytes, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE | STGM_TRANSACTED, 0, &storage) == S_OK);
+    ATL::CComObject<StorageMonitor>* monitor = nullptr;
+    REQUIRE(ATL::CComObject<StorageMonitor>::CreateInstance(&monitor) == S_OK && monitor);
+    monitor->native.Attach(storage.Detach()); monitor->destroyed = &mediumDestroyed;
+    monitor->AddRef(); storage.Attach(monitor);
+    REQUIRE(save->InitNew(storage) == S_OK && save->InitNew(storage) == CO_E_ALREADYINITIALIZED && source.initializedCalls == 2);
+    ATL::CComPtr<IStream> sibling;
+    REQUIRE(storage->CreateStream(L"Sibling", STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, 0, &sibling) == S_OK);
+    const BYTE marker = 0x5A; ULONG transferred = 0;
+    REQUIRE(sibling->Write(&marker, 1, &transferred) == S_OK && transferred == 1); sibling.Release();
+    REQUIRE(::WriteClassStg(storage, CLSID_StdFont) == S_OK && storage->Commit(STGC_DEFAULT) == S_OK);
+    const int beforeMissing = target.loads;
+    REQUIRE(FAILED(load->Load(storage)) && target.loads == beforeMissing);
+    REQUIRE(save->Save(storage, FALSE) == S_OK && source.clearDirty == FALSE && save->IsDirty() == S_OK);
+    REQUIRE(::ReadClassStg(storage, &id) == S_OK && id == CLSID_StdFont); // Save does not write the CLSID.
+    REQUIRE(load->Load(storage) == S_OK && target.payload == source.payload && load->IsDirty() == S_FALSE);
+    REQUIRE(storage->Revert() == S_OK && FAILED(load->Load(storage))); // Save did not commit the root.
+    REQUIRE(save->Save(storage, TRUE) == S_OK && source.clearDirty == TRUE && save->IsDirty() == S_FALSE);
+    REQUIRE(save->SaveCompleted(nullptr) == S_OK && save->HandsOffStorage() == S_OK);
+    source.payload = {9,8,7}; source.dirty = true;
+    REQUIRE(save->Save(storage, TRUE) == S_OK && load->Load(storage) == S_OK && target.payload == source.payload);
+    REQUIRE(storage->OpenStream(L"Contents", nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &sibling) == S_OK);
+    STATSTG info{}; REQUIRE(sibling->Stat(&info, STATFLAG_NONAME) == S_OK && info.cbSize.QuadPart == 3); sibling.Release();
+    REQUIRE(storage->OpenStream(L"Sibling", nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &sibling) == S_OK);
+    BYTE actual = 0; REQUIRE(sibling->Read(&actual, 1, &transferred) == S_OK && transferred == 1 && actual == marker); sibling.Release();
+    source.dirty = true;
+    REQUIRE(::OleSave(save, storage, TRUE) == S_OK && ::ReadClassStg(storage, &id) == S_OK && id == StorageClass);
+    REQUIRE(save->SaveCompleted(storage) == S_OK && storage->Commit(STGC_DEFAULT) == S_OK);
+    for (int mode = 1; mode <= 2; ++mode) {
+        source.queryFailure = mode;
+        const HRESULT expected = mode == 1 ? E_NOINTERFACE : E_UNEXPECTED;
+        REQUIRE(save->IsDirty() == expected && save->InitNew(storage) == expected &&
+            save->Load(storage) == expected && save->Save(storage, TRUE) == expected);
+        REQUIRE(save->GetClassID(&id) == S_OK && id == StorageClass && save->SaveCompleted(nullptr) == S_OK && save->HandsOffStorage() == S_OK);
+    }
+    source.queryFailure = 0;
+    REQUIRE(load->Load(storage) == S_OK && target.payload == source.payload); // Failed QI did not truncate Contents.
+    for (int mode = 1; mode <= 4; ++mode) {
+        source.failure = mode; source.dirty = true;
+        const HRESULT expected = mode == 1 ? E_ACCESSDENIED : mode == 2 ? E_ABORT : mode == 3 ? E_OUTOFMEMORY : E_UNEXPECTED;
+        REQUIRE(save->IsDirty() == expected && save->InitNew(storage) == expected &&
+            save->Load(storage) == expected && save->Save(storage, TRUE) == expected && source.dirty);
+        REQUIRE(save->SaveCompleted(storage) == S_OK && save->HandsOffStorage() == S_OK);
+    }
+    source.failure = 0;
+    REQUIRE(save->Save(storage, TRUE) == S_OK && load->Load(storage) == S_OK && target.payload == source.payload);
+    REQUIRE(storage->Commit(STGC_DEFAULT) == S_OK); storage.Release();
+    REQUIRE(mediumDestroyed == 1); // Both objects are alive; no adapter holds this supplied medium.
+    // HGLOBAL does not guarantee cross-instance region locks; this is a byte round trip.
+    ATL::CComPtr<IStorage> readOnly;
+    REQUIRE(::StgOpenStorageOnILockBytes(bytes, nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, nullptr, 0, &readOnly) == S_OK);
+    REQUIRE(load->Load(readOnly) == S_OK && target.payload == source.payload);
+    const int saves = source.saves; source.dirty = true;
+    REQUIRE(FAILED(save->Save(readOnly, TRUE)) && source.saves == saves && source.dirty);
+    REQUIRE(source.valid && target.valid);
+    identity.Release(); fromStream.Release(); streamFace.Release(); save.Release(); load.Release();
+    REQUIRE(source.destroyed == 1 && target.destroyed == 1 && module.GetLockCount() == 0);
+    readOnly.Release();
+    REQUIRE(::StgOpenStorageOnILockBytes(bytes, nullptr, STGM_READWRITE | STGM_SHARE_EXCLUSIVE, nullptr, 0, &storage) == S_OK);
+    StorageState dropped; ATL::CComPtr<IPersistStorage> last;
+    REQUIRE(CreateStoredObject(dropped, last)); dropped.reenter = false; dropped.dirty = true;
+    dropped.dropOwner = last.Detach();
+    REQUIRE(dropped.dropOwner->Save(storage, TRUE) == S_OK && !dropped.dropOwner && !dropped.dirty && dropped.destroyed == 1);
+    REQUIRE(module.GetLockCount() == 0);
+    return true;
+}
 bool creation() {
     ControlState state;
     CLSID classId{}; REQUIRE(::CoCreateGuid(&classId) == S_OK);
@@ -1050,7 +1244,8 @@ bool RunHostLifecycleTests() {
     const bool resources = resourceInitialization();
     const bool ui = uiHandlers();
     const bool properties = propertyFrames();
-    return created && active && resources && ui && properties;
+    const bool storage = storagePersistence();
+    return created && active && resources && ui && properties && storage;
 }
 bool RunBrowserUIHandlerTest(ATL::CAxWindow& window, IHTMLDocument2* document) {
     UIState state; state.browser = true;

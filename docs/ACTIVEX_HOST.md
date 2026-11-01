@@ -124,12 +124,15 @@ Automation DISPIDs to pages and obtains current display text through native
 IDispatch/VariantChangeType; EX entries select their declared dispatch interface.
 Its default predefined-value list is empty. `IPersistPropertyBagImpl` loads/saves
 mapped dispatch properties and checked scalar data members through the caller's
-IPropertyBag. The full ATL property-page classes, stream persistence and
+IPropertyBag. `IPersistStorageImpl` delegates native IStorage Contents streams
+to a separately exposed IPersistStreamInit implementation, without retaining
+the storage between calls. The full ATL property-page classes, property-map stream serialization and
 interface-serialization callbacks remain unfinished; declaring a map alone does
 not save data.
 See [property-map scope](ATL_COMPATIBILITY.md#property-map-page-discovery).
 See [per-property browsing](ATL_COMPATIBILITY.md#per-property-browsing).
 See [property-bag persistence](ATL_COMPATIBILITY.md#property-bag-persistence).
+See [storage-to-stream persistence](ATL_COMPATIBILITY.md#storage-to-stream-persistence).
 See [native property frames](ATL_COMPATIBILITY.md#native-property-frames).
 Simple sink handlers currently return void or HRESULT; the complete Automation
 return-value surface is not yet implemented.
