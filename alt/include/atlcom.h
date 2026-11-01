@@ -835,7 +835,8 @@ public: \
     namespace { \
         ATL::detail::AutoObjectEntry _OPENATL_AUTO_CAT(_openatlAutoEntry_, __COUNTER__)( \
             (clsid), nullptr, ATL::detail::AutoRegistryMethod<type>::callback, \
-            &ATL::detail::AutoClassCreator<type>::CreateInstance); \
+            &ATL::detail::AutoClassCreator<type>::CreateInstance, \
+            &ATL::detail::AutoObjectType<type>::identity); \
     }
 
 // Standard module registration supplies a lazy image/root context; explicit

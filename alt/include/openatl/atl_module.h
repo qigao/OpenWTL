@@ -548,23 +548,34 @@ struct AutoRegistryMethod<Class,
 };
 
 struct AutoObjectEntry;
+template<class T> struct AutoObjectType { inline static char identity = 0; };
 inline std::atomic<AutoObjectEntry*> autoObjectEntries{nullptr};
 struct AutoObjectEntry {
     const CLSID clsid;
     const OpenATL::COM::Creator creator;
     const OpenATL::COM::AggregatedCreator creatorWithOuter;
     const AutoRegistryCallback registrar;
+    const void* const typeIdentity;
     AutoObjectEntry* next = nullptr;
 
     AutoObjectEntry(REFCLSID id, OpenATL::COM::Creator function,
                     AutoRegistryCallback registry = nullptr,
-                    OpenATL::COM::AggregatedCreator aggregate = nullptr) noexcept
-        : clsid(id), creator(function), creatorWithOuter(aggregate), registrar(registry) {
-        AutoObjectEntry* head = autoObjectEntries.load(std::memory_order_relaxed);
-        do {
+                    OpenATL::COM::AggregatedCreator aggregate = nullptr,
+                    const void* type = nullptr) noexcept
+        : clsid(id), creator(function), creatorWithOuter(aggregate), registrar(registry), typeIdentity(type) {
+        AutoObjectEntry* head = autoObjectEntries.load(std::memory_order_acquire);
+        for (;;) {
+            // A header may declare the same OBJECT_ENTRY_AUTO in multiple
+            // translation units. Coalesce only the same type and metadata;
+            // conflicting CLSIDs/types still reach Initialize's validation.
+            if (type) for (const auto* item = head; item; item = item->next)
+                if (item->typeIdentity == type && IsEqualCLSID(item->clsid, id) &&
+                    item->creator == function && item->creatorWithOuter == aggregate &&
+                    item->registrar == registry) return;
             next = head;
-        } while (!autoObjectEntries.compare_exchange_weak(
-            head, this, std::memory_order_release, std::memory_order_relaxed));
+            if (autoObjectEntries.compare_exchange_weak(
+                    head, this, std::memory_order_acq_rel, std::memory_order_acquire)) return;
+        }
     }
     AutoObjectEntry(const AutoObjectEntry&) = delete;
     AutoObjectEntry& operator=(const AutoObjectEntry&) = delete;

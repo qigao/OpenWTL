@@ -216,3 +216,17 @@ unload. Existing TypeLib cases verify a real IOuter Invoke failure and its
 native EXCEPINFO description, help metadata and HRESULT. Arbitrary Automation
 argument conversion, remote error propagation and all original COMMap sources
 remain separate acceptance work.
+
+
+## Repeated automatic object-map declarations
+
+OBJECT_ENTRY_AUTO uses a shared per-type identity to coalesce identical
+CLSID/type/creator/registrar records declared in multiple translation units.
+This is needed by the unchanged COMMap Chain/Outer and aggreg headers. The
+metadata list remains allocation-free during static construction. Untagged
+explicit records and conflicting type/callback records are not coalesced;
+the existing module duplicate-CLSID validation still rejects conflicts.
+
+The original six class bodies are additionally compiled/executed by the
+existing STA events case; see OFFICIAL_SAMPLES.md. This qualifies their used
+API subset, not original DLL module/resource/registration or full ATL layout.

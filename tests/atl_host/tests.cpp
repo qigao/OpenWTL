@@ -4,6 +4,9 @@
 #include <stdexcept>
 #include <thread>
 bool RunHostLifecycleTests();
+#if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
+bool RunMicrosoftCommapClassTests();
+#endif
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "ACTIVEX_FAIL line=%d: %s hr=%08lx\n", __LINE__, #x, static_cast<unsigned long>(::GetLastError())); return false; } } while (0)
 namespace {
@@ -234,7 +237,11 @@ int main(int argc, char** argv) {
     if (::CoGetContextToken(&token) != CO_E_NOTINITIALIZED || !ATL::AtlAxWinInit() ||
         ::CoGetContextToken(&token) != CO_E_NOTINITIALIZED) return 1;
     HRESULT hr = ::OleInitialize(nullptr); if (FAILED(hr)) return 1;
-    bool ok = test();
+    bool ok = true;
+#if defined(OPENATL_ORIGINAL_COMMAP_CLASSES)
+    if (test == events) ok = RunMicrosoftCommapClassTests();
+#endif
+    if (ok) ok = test();
     ::OleUninitialize();
     ok = ok && ::CoGetContextToken(&token) == CO_E_NOTINITIALIZED;
     if (ok) std::puts("ACTIVEX_OK");

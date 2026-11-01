@@ -137,12 +137,43 @@ if(CMAKE_HOST_WIN32)
       ${_openatl_midl_cpp_args} ${_openatl_midl_include_flags}
       /out "${_openatl_commap_generated}" /h COMMap.h
       /iid COMMap_i.c /tlb COMMap.tlb "${_openatl_commap_idl}"
+    COMMAND "${CMAKE_COMMAND}" "-DOPENATL_MIDL_MINGW=${MINGW}"
+      "-DOPENATL_MIDL_HEADER=${_openatl_commap_header}"
+      -P "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
     DEPENDS "${_openatl_commap_idl}"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
     COMMENT "Actual Windows SDK MIDL: original Microsoft COMMap.idl"
+    VERBATIM)
+  # The original COuter includes and activates the sample's four aggregate
+  # classes. Generate their real declarations/IIDs from unchanged Aggreg.idl.
+  set(_openatl_aggreg_generated "${_openatl_commap_generated}/aggreg")
+  file(MAKE_DIRECTORY "${_openatl_aggreg_generated}")
+  set(_openatl_aggreg_idl "${_openatl_commap_original}/aggreg/Aggreg.idl")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_openatl_commap_original}/original_sources.json" "${_openatl_aggreg_idl}")
+  add_custom_command(
+    OUTPUT "${_openatl_aggreg_generated}/Aggreg.h"
+           "${_openatl_aggreg_generated}/aggreg_i.c"
+           "${_openatl_aggreg_generated}/Aggreg.tlb"
+    COMMAND "${OPENATL_COMMAP_MIDL_EXECUTABLE}" /nologo /env ${_openatl_midl_env}
+      ${_openatl_midl_cpp_args} ${_openatl_midl_include_flags}
+      /out "${_openatl_aggreg_generated}" /h Aggreg.h
+      /iid aggreg_i.c /tlb Aggreg.tlb "${_openatl_aggreg_idl}"
+    COMMAND "${CMAKE_COMMAND}" "-DOPENATL_MIDL_MINGW=${MINGW}"
+      "-DOPENATL_MIDL_HEADER=${_openatl_aggreg_generated}/Aggreg.h"
+      -P "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+    DEPENDS "${_openatl_aggreg_idl}"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLMidlUUID.cmake"
+      "${PROJECT_SOURCE_DIR}/cmake/OpenATLRibbon.cmake"
+    COMMENT "Actual Windows SDK MIDL: original Microsoft Aggreg.idl"
     VERBATIM)
   add_custom_target(openatl_microsoft_commap_midl ALL DEPENDS
     "${_openatl_commap_header}" "${_openatl_commap_iid}"
-    "${_openatl_commap_tlb}")
+    "${_openatl_commap_tlb}"
+    "${_openatl_aggreg_generated}/Aggreg.h"
+    "${_openatl_aggreg_generated}/aggreg_i.c"
+    "${_openatl_aggreg_generated}/Aggreg.tlb")
   add_dependencies(openatl_com_server_tests openatl_microsoft_commap_midl)
   set_source_files_properties("${_openatl_commap_iid}"
     PROPERTIES GENERATED TRUE LANGUAGE CXX)

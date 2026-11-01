@@ -1,0 +1,27 @@
+# Windows SDK MIDL does not emit mingw-w64's __uuidof specializations.
+# Add bindings to generated headers from their own UUID annotations, using the
+# same GUID formatter already used for native SDK Ribbon declarations.
+if(NOT OPENATL_MIDL_MINGW)
+  return()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/OpenATLRibbon.cmake")
+file(READ "${OPENATL_MIDL_HEADER}" header)
+set(uuids "")
+set(definitions "")
+string(REGEX MATCHALL "MIDL_INTERFACE\\(\"[0-9a-fA-F-]+\"\\)[ \t\r\n]+[A-Za-z_0-9]+[ \t\r\n]*:[ \t\r\n]*public" interfaces "${header}")
+foreach(entry IN LISTS interfaces)
+  string(REGEX MATCH "MIDL_INTERFACE\\(\"([0-9a-fA-F-]+)\"\\)[ \t\r\n]+([A-Za-z_0-9]+)" ignored "${entry}")
+  _openatl_ribbon_guid("${CMAKE_MATCH_2}" "${CMAKE_MATCH_1}" "unused")
+endforeach()
+string(REGEX MATCHALL "DECLSPEC_UUID\\(\"[0-9a-fA-F-]+\"\\)[ \t\r\n]+[A-Za-z_0-9]+" classes "${header}")
+foreach(entry IN LISTS classes)
+  string(REGEX MATCH "DECLSPEC_UUID\\(\"([0-9a-fA-F-]+)\"\\)[ \t\r\n]+([A-Za-z_0-9]+)" ignored "${entry}")
+  _openatl_ribbon_guid("${CMAKE_MATCH_2}" "${CMAKE_MATCH_1}" "unused")
+endforeach()
+if(NOT uuids)
+  message(FATAL_ERROR "No native MIDL UUID annotations: ${OPENATL_MIDL_HEADER}")
+endif()
+get_filename_component(name "${OPENATL_MIDL_HEADER}" NAME)
+string(MD5 identity "${name}")
+file(APPEND "${OPENATL_MIDL_HEADER}"
+  "\n#if defined(__cplusplus) && defined(__MINGW32__) && !defined(OPENATL_MIDL_UUID_${identity})\n#define OPENATL_MIDL_UUID_${identity}\n${uuids}#endif\n")

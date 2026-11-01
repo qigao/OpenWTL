@@ -642,3 +642,22 @@ server-object release, unregistration and actual DLL unload. Existing ordinary
 and cached tear-off IOuter TypeLib cases execute a failing real Invoke and check
 its native EXCEPINFO. These checks qualify this error-reporting subset, not all
 Automation exceptions or complete original Microsoft application compatibility.
+
+
+## Original COMMap class-source subset
+
+The existing STA ActiveX events case now builds the unchanged Outer/Chain and
+four nested aggreg class bodies from a byte-pinned Microsoft snapshot. Native
+process-local registration exercises all six logical OBJECT_ENTRY_AUTO classes
+without registry writes. Tests execute the eight original GetName routes,
+class factories, initial/partial FinalConstruct failure cleanup, specific/blind/
+automatic aggregation, chained canonical identity, ordinary/cached tear-offs,
+explicit native TypeLib Invoke and original rich errors. A cached interface
+retains the owner and module pins after factory revocation until final release.
+
+Repeated identical object entries from headers coalesce by type/CLSID/callback
+identity. Conflicting registrations remain invalid. No original methods/macros
+are transformed; no test target or mode is added. This does not admit the
+original COMMap.cpp/Aggreg.cpp DLL entry points, separate binary resources,
+registration or complete original project deployment. The original classes
+remain single-threaded and are used on the existing STA owner.
